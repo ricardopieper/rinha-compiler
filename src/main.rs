@@ -2,6 +2,8 @@
 #![feature(type_changing_struct_update)]
 #![recursion_limit = "256"]
 
+use std::collections::HashMap;
+
 use clap::Parser;
 use lalrpop_util::lalrpop_mod;
 use miette::IntoDiagnostic;
@@ -23,6 +25,8 @@ pub mod ast;
 /// Parser LALRPOP module. It does uses a parse generator to
 /// generate a parser and lexer for the language.
 pub mod parser;
+
+pub mod lambda_compiler;
 
 /// Simple program to run `rinha` language.
 #[derive(clap::Parser, Debug)]
@@ -77,13 +81,12 @@ fn program() -> miette::Result<()> {
     let file = std::fs::read_to_string(&command.main).into_diagnostic()?;
     let file = crate::parser::parse_or_report(&command.main, &file)?;
 
-    let json = if command.pretty {
-        serde_json::to_string_pretty(&file).into_diagnostic()?
-    } else {
-        serde_json::to_string(&file).into_diagnostic()?
-    };
+    let mut compiler = lambda_compiler::LambdaCompiler::new();
+    let program = compiler.compile(file.expression);
 
-    println!("{json}");
+    let mut ee = lambda_compiler::ExecutionContext::new();
+    ee.functions = compiler.all_functions;
+    program(&mut ee);
 
     Ok(())
 }
