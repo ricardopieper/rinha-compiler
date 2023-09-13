@@ -2,8 +2,6 @@
 #![feature(type_changing_struct_update)]
 #![recursion_limit = "256"]
 
-use std::collections::HashMap;
-
 use clap::Parser;
 use lalrpop_util::lalrpop_mod;
 use miette::IntoDiagnostic;
@@ -57,8 +55,10 @@ fn log(out: fern::FormatCallback, message: &std::fmt::Arguments, record: &log::R
     out.finish(format_args!("  {level:>7} {}", message))
 }
 
+
 /// The main function of the program.
 fn program() -> miette::Result<()> {
+
     // Initialize the bupropion handler with miette
     bupropion::BupropionHandlerOpts::install(|| {
         // Build the bupropion handler options, for specific
@@ -81,12 +81,12 @@ fn program() -> miette::Result<()> {
     let file = std::fs::read_to_string(&command.main).into_diagnostic()?;
     let file = crate::parser::parse_or_report(&command.main, &file)?;
 
-    let mut compiler = lambda_compiler::LambdaCompiler::new();
+    let compiler = lambda_compiler::LambdaCompiler::new();
     let program = compiler.compile(file.expression);
 
-    let mut ee = lambda_compiler::ExecutionContext::new();
-    ee.functions = compiler.all_functions;
-    program(&mut ee);
+    let mut ee = lambda_compiler::ExecutionContext::new(&program);
+
+    (program.main)(&mut ee);
 
     Ok(())
 }

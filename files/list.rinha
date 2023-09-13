@@ -1,0 +1,101 @@
+let nil = ("<nil>", "<nil>");
+let add = fn(ls, item) => {
+  if (ls == nil) {
+    (item, nil)
+  } else {
+    let x = first(ls);
+    let xs = second(ls);
+    if (xs == nil) {
+      (x, (item, nil))
+    } else {
+      (x, add(xs, item))
+    }
+  }
+};
+
+let count = fn(ls) => {
+  if (ls == nil) {
+    0
+  } else {
+    1 + count(second(ls))
+  }
+};
+
+
+let remove_idx = fn (ls, idx) => {
+  let remover = fn (ls, idx, cur) => {
+    if (idx == cur) {
+      second(ls)
+    } else {
+      (first(ls), remover(second(ls), idx, cur + 1))
+    }
+  };
+  remover(ls, idx, 0)
+};
+
+let map = fn(ls, f) => {
+  if (ls == nil) {
+    ls
+  } else {
+    let x = first(ls);
+    let xs = second(ls);
+    (f(x), map(xs, f))
+  }
+};
+
+let flatmap = fn(ls, f) => {
+  if (ls == nil) {
+    ls
+  } else {
+    let x = first(ls);
+    let xs = second(ls);
+    let m = f(x);
+    (first(m), (second(m), flatmap(xs, f)))
+  }
+};
+
+let pop = fn(ls) => {
+  if (ls == nil) {
+    ls
+  } else {
+    let x = first(ls); //x
+    let xs = second(ls); //nil, nil
+    if (xs == nil) {
+      nil
+    } else {
+      (x, pop(xs))
+    }
+  }
+};
+
+let my_list = nil;
+let my_list = add(my_list, 1);
+let _ = print(my_list);
+let my_list = add(my_list, 2);
+let _ = print(my_list);
+let my_list = add(my_list, 3);
+let _ = print(my_list);
+let my_list = add(my_list, 6);
+let _ = print(my_list);
+let my_list = add(my_list, 7);
+let _ = print(my_list);
+let my_list = add(my_list, 999);
+let _ = print(my_list);
+
+let _ = print(count(my_list));
+
+let my_list = remove_idx(my_list, 3);
+let _ = print(my_list);
+
+let mapped = map(my_list, fn(x) => { (x, x * 2) });
+
+let _ = print(mapped);
+
+let flatmapped =  flatmap(my_list, fn(x) => { (x, x * 2) });
+let _ = print(flatmapped);
+
+
+let popped = pop(my_list);
+let _ = print(popped);
+
+0

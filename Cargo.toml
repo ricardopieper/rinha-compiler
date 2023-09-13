@@ -38,3 +38,17 @@ serde_json = "1.0.105"
 # Add a build-time dependency on the lalrpop library:
 [build-dependencies]
 lalrpop = "0.20.0"
+
+[dev-dependencies]
+criterion = "0.3"
+
+
+[[bench]]
+name = "rinha_bench"
+harness = false
+
+[profile.release]
+debug = true
+
+[profile.bench]
+debug = true

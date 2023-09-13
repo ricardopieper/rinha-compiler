@@ -1,0 +1,141 @@
+//This file tests cases in the SPEC.md file. The things described there should work.
+
+let assert_eq = fn(a, b) => {
+    let _ = print("Comparing: " + a + " == " + b);
+    if (a == b) {
+        print("SUCCESS: Expected equals: " + a + " == " + b)
+    } else {
+        print("ERROR: Expected equals: " + a + " == " + b)
+    }
+};
+
+let neg = fn(x) => {
+    x - (2 * x)
+};
+
+//Rinha doesn't seem to support unary literals
+let neg1 = 1 - 2;
+let neg2 = neg(2);
+
+let _ = assert_eq("-1", neg1 + "");
+let _ = assert_eq("-2", neg2 + "");
+
+let _ = assert_eq(1, 2); //this one should fail! it tests assert_eq works.
+
+let _ = print("ˆˆˆˆˆˆ IGNORE THIS ERROR");
+
+let _ = print("Testing Add binop:");
+let _ = assert_eq(1, 1);
+let _ = assert_eq(2, 1 + 1);
+let _ = assert_eq(3 + 5, 8);
+let _ = assert_eq("a" + 2, "a2");
+let _ = assert_eq(2 + "a", "2a");
+let _ = assert_eq("a" + "b", "ab");
+
+
+//Sub BinOp
+let _ = print("Testing Sub binop:");
+let _ = assert_eq(0 - 1, neg1);
+let _ = assert_eq(100 - 75, 25);
+let _ = assert_eq(neg1 * 100 - 75, neg(175));
+let _ = assert_eq(neg1 * 100 + 75, neg(25));
+
+
+//Mul BinOp
+let _ = print("Testing Mul binop:");
+let _ = assert_eq(2 * 2, 4);
+let _ = assert_eq(2 * neg2, neg(4));
+let _ = assert_eq(neg2 * neg2, 4);
+let _ = assert_eq(2 * neg2, neg(4));
+
+//Div BinOp
+let _ = print("Testing Div binop:");
+
+let _ = assert_eq(40 / 2, 20);
+let _ = assert_eq(neg(40) / 2, neg(20));
+let _ = assert_eq(40 / neg2, neg(20));
+let _ = assert_eq(neg(40) / neg2, 20);
+
+//Rem BinOp
+let _ = print("Testing Rem binop:");
+
+let _ = assert_eq(40 % 2, 0);
+let _ = assert_eq(3 % 2, 1);
+let _ = assert_eq(neg(3) % 2, neg1);
+let _ = assert_eq(3 % neg2, 1);
+let _ = assert_eq(neg(3) % neg2, neg1);
+
+//Eq BinOp
+let _ = print("Testing Eq binop:");
+let _ = assert_eq("a", "a");
+let _ = assert_eq(true, true);
+let _ = assert_eq(true == false, false);
+let _ = assert_eq(false == false, true);
+//the rest has been tested by the previous tests
+
+//Neq BinOp
+let _ = print("Testing new binop:");
+let _ = assert_eq("a" != "b", true);
+let _ = assert_eq("a" != "a", false);
+let _ = assert_eq(true != false, true);
+let _ = assert_eq(true != true, false);
+let _ = assert_eq(1 != neg1, true);
+let _ = assert_eq(1 != 1, false);
+
+//Lt BinOp
+let _ = print("Testing Lt binop:");
+let _ = assert_eq(0 < 1, true);
+let _ = assert_eq(1 < 0, false);
+let _ = assert_eq(neg(10) < 1, true);
+let _ = assert_eq(neg(10) < neg(5), true);
+let _ = assert_eq(neg(10) < 10, true);
+let _ = assert_eq(neg(10) < neg(20), false);
+
+//Lte Binop
+let _ = print("Testing Lte binop:");
+let _ = assert_eq(0 <= 1, true);
+let _ = assert_eq(0 <= 0, true);
+let _ = assert_eq(1 <= 0, false);
+let _ = assert_eq(1 <= 1, true);
+let _ = assert_eq(neg(10) <= 1, true);
+let _ = assert_eq(neg(10) <= neg(10), true);
+
+
+//Gt Binop
+let _ = print("Testing Gt binop:");
+let _ = assert_eq(40 > 30, true);
+let _ = assert_eq(40 > neg(30), true);
+let _ = assert_eq(0 > 1, false);
+let _ = assert_eq(0 > 0, false);
+let _ = assert_eq(1 > 0, true);
+let _ = assert_eq(1 > 1, false);
+let _ = assert_eq(neg(10) > 1, false);
+let _ = assert_eq(neg(10) > neg(10), false);
+
+//Gte Binop
+let _ = print("Testing Gte binop:");
+let _ = assert_eq(40 >= 30, true);
+let _ = assert_eq(40 >= neg(30), true);
+let _ = assert_eq(0 >= 1, false);
+let _ = assert_eq(0 >= 0, true);
+let _ = assert_eq(1 >= 0, true);
+let _ = assert_eq(1 >= 1, true);
+let _ = assert_eq(neg(10) >= 1, false);
+let _ = assert_eq(neg(10) >= neg(10), true);
+
+//And BinOp
+let _ = print("Testing And binop:");
+
+let _ = assert_eq(true && true, true);
+let _ = assert_eq(true && false, false);
+let _ = assert_eq(false && false, false);
+let _ = assert_eq(false && true, false);
+
+//Or BinOp
+let _ = print("Testing Or binop:");
+let _ = assert_eq(true || true, true);
+let _ = assert_eq(true || false, true);
+let _ = assert_eq(false || false, false);
+let _ = assert_eq(false || true, true);
+
+0

@@ -1,0 +1,21 @@
+//This file tests cases in the SPEC.md file. The things described there should work.
+
+let assert_eq = fn(a, b) => {
+    let _ = print("Comparing: " + a + " == " + b);
+    if (a == b) {
+        print("SUCCESS: Expected equals: " + a + " == " + b)
+    } else {
+        print("ERROR: Expected equals: " + a + " == " + b)
+    }
+};
+
+let _ = assert_eq(11, 11);
+let _ = assert_eq("11", "11");
+let _ = assert_eq(true, true);
+
+//these should panic the interpreter
+//let _ = assert_eq(11, "11");
+//let _ = assert_eq((11, 11), "11");
+//let _ = assert_eq((11, 11), ("11", 11));
+
+0

@@ -1,0 +1,10 @@
+let x = 10;
+let weird = fn (n) => {
+  fn (f) => {
+    f * n + x + shouldnt_work
+  }
+};
+let weird_fn = weird(2);
+let shouldnt_work = 1000;
+let wtf = weird_fn(2);
+print (wtf)

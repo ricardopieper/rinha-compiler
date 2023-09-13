@@ -1,0 +1,13 @@
+let pow = fn (a, b) => {
+  if(b > 0) {
+    a * pow(a, b - 1)
+  } else { 1 }
+};
+
+let decpow = fn (n) => {
+  if(n > 1) {
+    pow(n, decpow(n - 1))
+  } else { 1 }
+};
+
+print(decpow(4))

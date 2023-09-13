@@ -5,9 +5,4 @@ let fib = fn (n) => {
     fib(n - 1) + fib(n - 2)
   }
 };
-
-let x = 10;
-let _ = print (x);
-let _ = print ("fib " + fib(20));
-let _ = print ((10 * (14 + 3)));
-print ("hello, world")
+print ("fib " + fib(30))

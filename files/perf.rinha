@@ -1,0 +1,24 @@
+let iter = fn (from, to, call, prev) => {
+  if (from < to) {
+    let res = call(from);
+    iter(from + 1, to, call, res)
+  } else {
+    prev
+  }
+};
+
+let work = fn(x) => {
+  let work_closure = fn(y) => {
+    let xx = x * y;
+    let tupl = (xx, x);
+    let f = first(tupl);
+    let s = second(tupl);
+    f * s
+  };
+
+  iter(0, 80, work_closure, 0)
+};
+
+let iteration = iter(0, 100, work, 0);
+
+print(iteration)

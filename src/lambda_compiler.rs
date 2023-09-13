@@ -1,21 +1,42 @@
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 
 use crate::{
     ast::{Binary, BinaryOp, Int, Let, Print, Term, Call, Function, Str, If, First, Second, Bool, Tuple},
     parser::Var,
 };
 
+
+#[derive(Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
+pub struct Closure {
+    pub callable_index: usize,
+    pub environment: Vec<Value>
+}
+
 /// Enum for runtime values
-#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
+#[derive(Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
 pub enum Value {
     /// Ints
     Int(i32),
     Bool(bool),
     Str(String),
     Tuple(Box<Value>, Box<Value>),
-    FunctionPointer(usize, &'static [&'static str]), //unhinged
+    Closure(Closure), //unhinged
     Error(String),
     Unit,
+}
+
+impl Value {
+    fn get_type(&self) -> Type {
+        match self {
+            Value::Int(_) => Type::Int,
+            Value::Str(_) => Type::Str,
+            Value::Tuple(..) => Type::Tuple,
+            Value::Closure(..) => Type::Function,
+            Value::Error(_) => Type::Error,
+            Value::Unit => Type::Unit,
+            Value::Bool(_) => Type::Bool,
+        }
+    }
 }
 
 impl ToString for Value {
@@ -24,7 +45,7 @@ impl ToString for Value {
             Value::Int(i) => i.to_string(),
             Value::Str(s) => s.to_string(),
             Value::Tuple(a, b) => format!("({}, {})", a.to_string(), b.to_string()),
-            Value::FunctionPointer(..) => "function".to_string(),
+            Value::Closure(..) => "function".to_string(),
             Value::Error(e) => format!("error: {}", e),
             Value::Unit => "unit".to_string(),
             Value::Bool(b) => b.to_string(),
@@ -33,34 +54,42 @@ impl ToString for Value {
 }
 
 pub struct StackFrame {
-    pub let_bindings: HashMap<&'static str, Value>,
-    pub stack: Vec<Value>,
-}
-impl StackFrame {
-    pub fn stack_pop(&mut self) -> Option<Value> {
-        self.stack.pop()
-    }
-    pub fn stack_push(&mut self, value: Value) {
-        self.stack.push(value);
-    }
+    pub let_bindings: Vec<Value>,
 }
 
+pub struct Callable {
+    pub parameters: &'static [usize],
+    pub body: Box<dyn Fn(&mut ExecutionContext) -> Value>
+}
 
-pub struct ExecutionContext {
+pub struct ExecutionContext<'a> {
     pub call_stack: Vec<StackFrame>,
-    pub functions: Vec<Box<dyn Fn(&mut ExecutionContext) -> ()>>
+    pub functions: &'a [Callable],
+    pub enable_memoization: bool,
+    pub num_of_vars: usize
 }
 
-impl ExecutionContext {
+pub struct CompilationResult {
+    pub main: Box<dyn Fn(&mut ExecutionContext) -> Value>,
+    pub strings: Vec<&'static str>,
+    pub functions: Vec<Callable>,
+}
 
-    pub fn new() -> Self {
+impl<'a> ExecutionContext<'a> {
+
+    pub fn new(program: &'a CompilationResult) -> Self {
         Self {
             call_stack: vec![StackFrame {
-                let_bindings: HashMap::new(),
-                stack: vec![]
+                let_bindings: vec![Value::Unit; program.strings.len()],
             }],
-            functions: vec![]
+            functions: &program.functions,
+            enable_memoization: true,
+            num_of_vars: program.strings.len()
         }
+    }
+
+    pub fn disable_memoization(&mut self) {
+        self.enable_memoization = false;
     }
 
     pub fn frame(&mut self) -> &mut StackFrame {
@@ -76,15 +105,18 @@ impl ExecutionContext {
 
 pub struct LambdaCompiler {
     //this is added into during compilation, but should be moved into the execution context later
-    pub all_functions: Vec<Box<dyn Fn(&mut ExecutionContext) -> ()>>
+    pub all_functions: Vec<Callable>,
+    pub var_names: Vec<&'static str>,
+    pub strict_equals: bool,
+
 }
 
-#[derive(Eq, PartialEq, PartialOrd, Ord)]
-pub enum TypeHint {
+#[derive(Eq, PartialEq, PartialOrd, Ord, Debug)]
+pub enum Type {
     Int,
     Str,
     Bool,
-    Tuple(Box<TypeHint>, Box<TypeHint>),
+    Tuple,
     Function,
     Error,
     Unit,
@@ -94,8 +126,25 @@ pub enum TypeHint {
 impl LambdaCompiler {
     pub fn new() -> Self {
         Self {
-            all_functions: vec![]
+            all_functions: vec![],
+            strict_equals: true,
+            var_names: vec![]
         }
+    }
+
+    pub fn relax_equals(&mut self) {
+        self.strict_equals = false;
+    }
+
+    pub fn intern_string(&mut self, s: &'static str) -> usize {
+        //check if it already exists
+        if let Some(index) = self.var_names.iter().position(|x| x == &s) {
+            return index;
+        }
+
+        let index = self.var_names.len();
+        self.var_names.push(s);
+        index
     }
 
     //The idea of the Lambda compiler is to avoid the dispatching overhead that comes with a VM.
@@ -117,121 +166,123 @@ impl LambdaCompiler {
     //This program has no loops, makes this whole idea easier since we don't need to loop back. Basically, we don't need to keep an instruction pointer,
     //but this idea does work in those cases too.
 
-    //whenever a function is declared, it captures the environment, which consists of the previous let bindings. This is necessary
-    //for functions to call other functions.
-    //The specs arent clear, but I assume that function parameters will take precedence over let bindings.
+    //whenever a function is constructed, it captures the environment. This is a closure.
 
-    //Let bindings work don't work the same as in Rust, except for _. This language has no shadowing.
-
-    pub fn compile(&mut self, ast: Term) -> Box<dyn Fn(&mut ExecutionContext) -> ()> {
+    fn compile_internal(&mut self, ast: Term) -> Box<dyn Fn(&mut ExecutionContext) -> Value> {
         return match ast {
             Term::Print(Print { value, .. }) => {
-                let evaluate_printed_value = self.compile(*value);
+                let evaluate_printed_value = self.compile_internal(*value);
                 //because the type of the expression is only known at runtime, we have to check it in the print function during runtime :(
                 Box::new(move |ec: &mut ExecutionContext| {
-                    evaluate_printed_value(ec);
-                    let value = ec.frame().stack_pop().unwrap();
-                    println!("{}", value.to_string());
-                    ec.frame().stack_push(Value::Unit);
+                    //println!("Stack frame on print: {:?}", ec.frame().let_bindings);
+                    let value_to_print = evaluate_printed_value(ec);
+                    println!("{}", value_to_print.to_string());
+                    return Value::Unit;
                 })
             }
-            Term::Int(Int { value, .. }) => Box::new(move |ec: &mut ExecutionContext| {
-                ec.frame().stack_push(Value::Int(value));
+            Term::Int(Int { value, .. }) => Box::new(move |_| {
+                return Value::Int(value);
             }),
             Term::Var(Var { text, .. }) => {
-                let varname_leaked = text.leak();
+                let varname_leaked: &'static str = text.leak();
+                let index = self.intern_string(varname_leaked);
+
                 Box::new(move |ec: &mut ExecutionContext| {
                     //@PERF no clone pls
-                    let value = ec.frame().let_bindings.get(varname_leaked).cloned();
+                   // println!("Stack frame on var: {:?} trying to get var {varname_leaked}", ec.frame().let_bindings);
+                    let value = ec.frame().let_bindings.get(index);
                     match value {
-                        Some(value) => ec.frame().stack_push(value),
+                        Some(value) => value.clone(),
                         None => panic!("Variable {varname_leaked} not found"),
                     }
                 })
             }
             Term::Let(Let {
-                name: Var { text, .. },
+                name: Var { text: var_name, .. },
                 value,
                 next,
                 ..
             }) => {
-                let evaluate_value = self.compile(*value);
-                let evaluate_next = self.compile(*next);
-                if text == "_" {
+                let evaluate_value = self.compile_internal(*value);
+                let evaluate_next = self.compile_internal(*next);
+                if var_name == "_" {
                     Box::new(move |ec: &mut ExecutionContext| {
                         evaluate_value(ec);
-                        evaluate_next(ec);
+                        let next = evaluate_next(ec);
+                        return next;
                     })
                 } else {
-                    let varname_leaked: &'static str = text.leak();
+                    let var_name_leaked: &'static str = var_name.leak();
+                    let next_index = self.intern_string(var_name_leaked);
                     Box::new(move |ec: &mut ExecutionContext| {
-                        evaluate_value(ec);
-                        let bound_value = ec.frame().stack_pop().unwrap();
-                        ec.frame().let_bindings.insert(varname_leaked, bound_value);
-                        evaluate_next(ec);
+                        let bound_value = evaluate_value(ec);
+                        ec.frame().let_bindings[next_index] = bound_value;
+                        //print stack frame
+                        //println!("Stack frame: {:?}", ec.frame().let_bindings);
+                        let next = evaluate_next(ec);
+                        return next;
                     })
                 }
             }
             Term::Error(e) => panic!("{}: {}", e.message, e.full_text),
             Term::Binary(Binary { lhs, op, rhs, .. }) => self.compile_binexp(lhs, rhs, op),
             Term::Str(Str{value, ..}) => {
-                Box::new(move |ec: &mut ExecutionContext| {
-                    ec.frame().stack_push(Value::Str(value.clone()))
-                })
+                Box::new(move |_| Value::Str(value.clone()))
             }
             Term::Call(Call{callee, arguments, ..}) => {
                 match &*callee {
                     Term::Var(v) => {
                         let called_name: &'static str = v.text.clone().leak();
-                        let evaluate_callee = self.compile(*callee);
-                        let arguments = arguments.into_iter().map(|arg| self.compile(arg)).collect::<Vec<_>>();
+                        let function_name_index = self.intern_string(called_name); 
+                        let evaluate_callee = self.compile_internal(*callee);
+                        let arguments = arguments.into_iter().map(|arg| self.compile_internal(arg)).collect::<Vec<_>>();
                         Box::new(move |ec: &mut ExecutionContext| {
-                            evaluate_callee(ec);
-                            let called_function = ec.frame().stack_pop().unwrap();
-                    
-                            let Value::FunctionPointer(index, params) = called_function else {
+                                                        
+                            let callee_function = evaluate_callee(ec);
+
+                            //println!("called {callee_function:?}");
+
+                            let Value::Closure(Closure{callable_index, environment}) = callee_function else {
                                 panic!("Call to non-function value {called_name}")
                             };
+                            {
+                                let callable = &ec.functions[callable_index];
 
-                            if params.len() != arguments.len() {
-                                panic!("Wrong number of arguments for function {called_name}")
+                                if callable.parameters.len() != arguments.len() {
+                                    panic!("Wrong number of arguments for function {called_name}")
+                                }
                             }
 
+                             //copy the environment to the let bindings of the new frame, they might be overriden by parameters
+                           
                             let mut new_frame = StackFrame {
-                                let_bindings: HashMap::new(),
-                                stack: vec![]
+                                let_bindings: environment.clone(),
                             };
 
-                            //insert into the new frame the let bindings of the previous frame
-                            //@PERF maybe don't clone the values here, find a way to do something like pointers that auto-deref somehow...
-                            for (key, value) in ec.frame().let_bindings.iter() {
-                               new_frame.let_bindings.insert(key, value.clone());
-                            }
                             
                             //in the let bindings, add ourselves so we can do recursion
-                            new_frame.let_bindings.insert(called_name, Value::FunctionPointer(index, params));
+                            new_frame.let_bindings[function_name_index] = Value::Closure(Closure { callable_index, environment });
 
-                            //evaluate the arguments
-                            for (argument, param) in arguments.iter().zip(params) {
-                                argument(ec);
-                                let value = ec.frame().stack_pop().unwrap();
-                                new_frame.let_bindings.insert(&param, value);
+                            {
+                                let params = ec.functions[callable_index].parameters;
+                                //evaluate the arguments
+                                for (argument, param) in arguments.iter().zip(params) {
+                                    let value = argument(ec);
+                                    new_frame.let_bindings[*param] = value;
+                                }
                             }
+                            
 
                             ec.push_frame(new_frame);
 
-                            //self.all_functions[index](ec);
-                            //start running the function in this new frame
-                            let function = &ec.functions[index];
-                            
                             //HACK: It's 3AM, this borrow is ok... trust me bro...
                             //erase the lifetime of the function pointer
-                            let function: &Box<dyn Fn(&mut ExecutionContext)> = unsafe { std::mem::transmute(function) };
-                            function(ec);
+                            let function: &Box<dyn Fn(&mut ExecutionContext) -> Value> = unsafe { std::mem::transmute(&ec.functions[callable_index].body) };
+                            //let function = &ec.functions[callable_index].body;
+                            let function_result = function(ec);
 
-                            let popped_value = ec.pop_frame().stack_pop().unwrap();
-                            //push into the previous frame
-                            ec.frame().stack_push(popped_value);
+                            ec.pop_frame();
+                            return function_result;
                         })
                     }
                     _ => panic!("Cannot call non-var term")
@@ -239,70 +290,82 @@ impl LambdaCompiler {
             }
             Term::Function(Function { parameters, value, .. }) => {
                 //Functions are compiled and stored into a big vector of functions, each one has a unique ID.
-                let new_function = self.compile(*value);
-                let index_of_new_function = self.all_functions.len();
-                self.all_functions.push(new_function);
+                let new_function = self.compile_internal(*value);
+
+               
                 let parameters = parameters.into_iter().map(|param| param.text).collect::<Vec<_>>();
-                let all_params_leaked = parameters.into_iter().map(|param| -> &'static str { param.leak()}).collect::<Vec<_>>();
-                let all_params_leaked: &'static [&'static str] = all_params_leaked.leak(); //absolutely unhinged
-                Box::new(move |ec: &mut ExecutionContext| {
-                    ec.frame().stack_push(Value::FunctionPointer(index_of_new_function, all_params_leaked));
+                let mut param_indices = vec![];
+                for param in parameters {
+                    let interned = self.intern_string(param.leak());
+                    param_indices.push(interned);
+                }
+                let callable = Callable {
+                    body: new_function,
+                    parameters: param_indices.leak()
+                };
+                let index_of_new_function = self.all_functions.len();
+
+                self.all_functions.push(callable);
+                Box::new(move |ec| {
+                    let environment = ec.frame().let_bindings.clone();
+                    Value::Closure(Closure { callable_index: index_of_new_function, environment })
                 })
             }
             Term::If(If {condition, then, otherwise, ..}) => {
-                let evaluate_condition = self.compile(*condition);
-                let evaluate_then = self.compile(*then);
-                let evaluate_otherwise = self.compile(*otherwise);
+                let evaluate_condition = self.compile_internal(*condition);
+                let evaluate_then = self.compile_internal(*then);
+                let evaluate_otherwise = self.compile_internal(*otherwise);
                 Box::new(move |ec: &mut ExecutionContext| {
-                    evaluate_condition(ec);
-                    let condition = ec.frame().stack_pop().unwrap();
-                    match condition {
+                    let condition_result = evaluate_condition(ec);
+                    match condition_result {
                         Value::Bool(true) => evaluate_then(ec),
                         Value::Bool(false) => evaluate_otherwise(ec),
-                        _ => panic!("Type error: Cannot evaluate condition on this value: {condition:?}"),
+                        _ => panic!("Type error: Cannot evaluate condition on this value: {condition_result:?}"),
                     }
                 })
             } 
             //only works on tuples
             Term::First(First{value, ..}) => {
-                let evaluate_value = self.compile(*value);
+                let evaluate_value = self.compile_internal(*value);
                 Box::new(move |ec: &mut ExecutionContext| {
-                    evaluate_value(ec);
-                    let value = ec.frame().stack_pop().unwrap();
+                    let value = evaluate_value(ec);
                     match value {
-                        Value::Tuple(a, _) => ec.frame().stack_push(*a),
+                        Value::Tuple(a, _) => *a,
                         _ => panic!("Type error: Cannot evaluate first on this value: {value:?}"),
                     }
                 })
             }
             Term::Second(Second{value, ..}) => {
-                let evaluate_value = self.compile(*value);
+                let evaluate_value = self.compile_internal(*value);
                 Box::new(move |ec: &mut ExecutionContext| {
-                    evaluate_value(ec);
-                    let value = ec.frame().stack_pop().unwrap();
+                    let value = evaluate_value(ec);
                     match value {
-                        Value::Tuple(_, a) => ec.frame().stack_push(*a),
+                        Value::Tuple(_, a) => *a,
                         _ => panic!("Type error: Cannot evaluate first on this value: {value:?}"),
                     }
                 })
             }
             Term::Bool(Bool {value, ..}) => {
-                Box::new(move |ec: &mut ExecutionContext| {
-                    ec.frame().stack_push(Value::Bool(value));
-                })
+                Box::new(move |_| Value::Bool(value))
             },
             Term::Tuple(Tuple{first, second, ..}) => {
-                let evaluate_first = self.compile(*first);
-                let evaluate_second = self.compile(*second);
+                let evaluate_first = self.compile_internal(*first);
+                let evaluate_second = self.compile_internal(*second);
                 Box::new(move |ec: &mut ExecutionContext| {
-                    evaluate_first(ec);
-                    evaluate_second(ec);
-                    let second = ec.frame().stack_pop().unwrap();
-                    let first = ec.frame().stack_pop().unwrap();
-                    ec.frame().stack_push(Value::Tuple(Box::new(first), Box::new(second)));
+                    Value::Tuple(Box::new(evaluate_first(ec)), Box::new(evaluate_second(ec)))
                 })
             }
         };
+    }
+
+    pub fn compile(mut self, ast: Term) -> CompilationResult {
+        let main = self.compile_internal(ast);
+       
+        CompilationResult {
+            main,
+            strings: self.var_names,
+            functions: self.all_functions
+        }
     }
 
     fn compile_binexp(
@@ -310,20 +373,18 @@ impl LambdaCompiler {
         lhs: Box<Term>,
         rhs: Box<Term>,
         op: BinaryOp
-    ) -> Box<dyn Fn(&mut ExecutionContext)> {
-        let evaluate_lhs = self.compile(*lhs);
-        let evaluate_rhs = self.compile(*rhs);
+    ) -> Box<dyn Fn(&mut ExecutionContext) -> Value> {
+        let evaluate_lhs = self.compile_internal(*lhs);
+        let evaluate_rhs = self.compile_internal(*rhs);
 
         macro_rules! int_binary_numeric_op {
             ($op:tt) => {
                 Box::new(move |ec: &mut ExecutionContext| {
-                    evaluate_lhs(ec);
-                    evaluate_rhs(ec);
-                    let rhs = ec.frame().stack_pop().unwrap();
-                    let lhs = ec.frame().stack_pop().unwrap();
+                    let lhs = evaluate_lhs(ec);
+                    let rhs = evaluate_rhs(ec);
                     match (&lhs, &rhs) {
                         (Value::Int(lhs), Value::Int(rhs)) => {
-                            ec.frame().stack_push(Value::Int(lhs $op rhs));
+                            Value::Int(lhs $op rhs)
                         }
                         _ => panic!("Type error: Cannot apply binary operator {op} on these values: {lhs:?} and {rhs:?}", op = stringify!($op)),
                     }
@@ -331,69 +392,76 @@ impl LambdaCompiler {
             };
         }
 
-        macro_rules! int_binary_logical_op {
+        macro_rules! binary_comparison_op {
             ($op:tt) => {
-                Box::new(move |ec: &mut ExecutionContext| {
-                    evaluate_lhs(ec);
-                    evaluate_rhs(ec);
-                    let rhs = ec.frame().stack_pop().unwrap();
-                    let lhs = ec.frame().stack_pop().unwrap();
-                    match (&lhs, &rhs) {
-                        (Value::Int(lhs), Value::Int(rhs)) => {
-                            ec.frame().stack_push(Value::Bool(lhs $op rhs));
+
+                if (self.strict_equals) {
+                    Box::new(move |ec: &mut ExecutionContext| {
+                        let lhs = evaluate_lhs(ec);
+                        let rhs = evaluate_rhs(ec);
+                        
+                        match (&lhs, &rhs) {
+                            (Value::Int(lhs), Value::Int(rhs)) => {
+                                Value::Bool(lhs $op rhs)
+                            }
+                            (Value::Str(lhs), Value::Str(rhs)) => {
+                                Value::Bool(lhs $op rhs)
+                            }
+                            (Value::Bool(lhs), Value::Bool(rhs)) => {
+                                Value::Bool(lhs $op rhs)
+                            }
+                            _ => panic!("Type error: Cannot apply binary operator {op} on these values: {lhs:?} and {rhs:?}", op = stringify!($op)),
                         }
-                        _ => panic!("Type error: Cannot apply binary operator {op} on these values: {lhs:?} and {rhs:?}", op = stringify!($op)),
-                    }
-                })
+                    })
+                } else {
+                    Box::new(move |ec: &mut ExecutionContext| {
+                        let lhs = evaluate_lhs(ec);
+                        let rhs = evaluate_rhs(ec);
+                        
+                        return Value::Bool(lhs $op rhs);
+                    })
+                }
             };
         }
 
         match op {
             BinaryOp::Add => Box::new(move |ec: &mut ExecutionContext| {
-                evaluate_lhs(ec);
-                evaluate_rhs(ec);
-                let rhs = ec.frame().stack_pop().unwrap();
-                let lhs = ec.frame().stack_pop().unwrap();
-                let value = match (&lhs, &rhs) {
+                let lhs = evaluate_lhs(ec);
+                let rhs = evaluate_rhs(ec);
+                match (&lhs, &rhs) {
                     (Value::Int(lhs), Value::Int(rhs)) => Value::Int(lhs + rhs),
                     (Value::Int(lhs), Value::Bool(rhs)) => Value::Int(lhs + *rhs as i32),
-                    (_, Value::Str(_)) | (Value::Str(_), _) => Value::Str(format!("{}{}", lhs.to_string(), rhs.to_string())),                           
+                    (_, Value::Str(_)) | (Value::Str(_), _) => Value::Str(format!("{}{}", lhs.to_string(), rhs.to_string())),
                     (Value::Bool(lhs), Value::Int(rhs)) => Value::Int(*lhs as i32 + *rhs),
                     _ => panic!("Type error: Cannot apply binary operator + on these values: {lhs:?} and {rhs:?}"),
-                };
-                ec.frame().stack_push(value);
+                }
             }),
             BinaryOp::Sub => int_binary_numeric_op!(-),
             BinaryOp::Mul => int_binary_numeric_op!(*),
             BinaryOp::Div => int_binary_numeric_op!(/),
             BinaryOp::Rem => int_binary_numeric_op!(%),
-            BinaryOp::Eq => int_binary_logical_op!(==),
-            BinaryOp::Neq => int_binary_logical_op!(!=),
-            BinaryOp::Lt => int_binary_logical_op!(<),
-            BinaryOp::Gt => int_binary_logical_op!(>),
-            BinaryOp::Lte => int_binary_logical_op!(<=),
-            BinaryOp::Gte => int_binary_logical_op!(>=),
+            BinaryOp::Eq => binary_comparison_op!(==),
+            BinaryOp::Neq => binary_comparison_op!(!=),
+            BinaryOp::Lt => binary_comparison_op!(<),
+            BinaryOp::Gt => binary_comparison_op!(>),
+            BinaryOp::Lte => binary_comparison_op!(<=),
+            BinaryOp::Gte => binary_comparison_op!(>=),
             BinaryOp::And => Box::new(move |ec: &mut ExecutionContext| {
-                evaluate_lhs(ec);
-                evaluate_rhs(ec);
-                let rhs = ec.frame().stack_pop().unwrap();
-                let lhs = ec.frame().stack_pop().unwrap();
-                let value = match (&lhs, &rhs) {
-                (Value::Bool(lhs), Value::Bool(rhs)) => Value::Bool(*lhs && *rhs),
-                _ => panic!("Type error: Cannot apply binary operator && (and) on these values: {lhs:?} and {rhs:?}"),
-            };
-                ec.frame().stack_push(value);
+                let lhs = evaluate_lhs(ec);
+                let rhs = evaluate_rhs(ec);
+               
+                match (&lhs, &rhs) {
+                    (Value::Bool(lhs), Value::Bool(rhs)) => Value::Bool(*lhs && *rhs),
+                    _ => panic!("Type error: Cannot apply binary operator && (and) on these values: {lhs:?} and {rhs:?}"),
+                }
             }),
             BinaryOp::Or => Box::new(move |ec: &mut ExecutionContext| {
-                evaluate_lhs(ec);
-                evaluate_rhs(ec);
-                let rhs = ec.frame().stack_pop().unwrap();
-                let lhs = ec.frame().stack_pop().unwrap();
-                let value = match (&lhs, &rhs) {
-                (Value::Bool(lhs), Value::Bool(rhs)) => Value::Bool(*lhs && *rhs),
-                _ => panic!("Type error: Cannot apply binary operator || (or) on these values: {lhs:?} and {rhs:?}"),
-            };
-                ec.frame().stack_push(value);
+                let lhs = evaluate_lhs(ec);
+                let rhs = evaluate_rhs(ec);
+                match (&lhs, &rhs) {
+                    (Value::Bool(lhs), Value::Bool(rhs)) => Value::Bool(*lhs || *rhs),
+                    _ => panic!("Type error: Cannot apply binary operator || (or) on these values: {lhs:?} and {rhs:?}"),
+                }
             }),
         }
     }

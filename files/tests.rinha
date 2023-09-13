@@ -1,0 +1,31 @@
+let fib = fn (n) => {
+  if (n < 2) {
+    n
+  } else {
+    fib(n - 1) + fib(n - 2)
+  }
+};
+let _ = print ("fib(30) should be 832040, is " + fib(30));
+
+let range = fn (from, to, f) => {
+  if (from < to) {
+    let _ = f(from);
+    loop(from + 1, to, f)
+  } else {
+    0
+  }
+};
+
+let map = fn(f) => {
+  fn (x) => {
+    f(x)
+  }
+};
+
+let doubler = map(fn(x) => { x * 2});
+
+let _ = print("Doubled = " + doubler(10));
+
+let _ = loop(0, 10, fn(x) => { print(x) });
+
+print("done!")

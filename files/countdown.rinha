@@ -1,0 +1,9 @@
+let countdown = fn (n) => {
+  if (n < 1) {
+    n
+  } else {
+    countdown(n - 1)
+  }
+};
+let x = countdown(1000);
+print (x)

@@ -1,0 +1,20 @@
+let map = fn(f) => {
+  fn (x) => {
+    f(x)
+  }
+};
+
+let iter = fn (from, to, call, prev) => {
+  if (from < to) {
+    let res = call(from);
+    range(from + 1, to, call, res)
+  } else {
+    prev
+  }
+};
+
+
+let _ = print("made map");
+let doubler = map(fn(x) => { x * 2});
+let 
+print("Doubled = " + doubler(10))
