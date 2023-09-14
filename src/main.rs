@@ -86,6 +86,9 @@ fn program() -> miette::Result<()> {
 
     let mut ee = lambda_compiler::ExecutionContext::new(&program);
 
+    //sleep 5s
+    //std::thread::sleep(std::time::Duration::from_secs(5));
+
     (program.main)(&mut ee);
 
 
