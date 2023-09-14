@@ -88,6 +88,9 @@ fn program() -> miette::Result<()> {
 
     (program.main)(&mut ee);
 
+
+    println!("Stats: {:#?}", ee.stats);
+
     Ok(())
 }
 

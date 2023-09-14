@@ -1,6 +1,8 @@
-use criterion::{criterion_group, criterion_main, Criterion, BenchmarkId};
-use rinha::{lambda_compiler::{ LambdaCompiler,  CompilationResult, ExecutionContext}, parser};
-
+use criterion::{BenchmarkId, Criterion};
+use rinha::{
+    lambda_compiler::{CompilationResult, ExecutionContext, LambdaCompiler},
+    parser,
+};
 
 fn compile(text: &str) -> CompilationResult {
     let file = parser::parse_or_report("bench_test", text).unwrap();
@@ -10,7 +12,6 @@ fn compile(text: &str) -> CompilationResult {
 
     return program;
 }
-
 
 const PERF_PROGRAM: &'static str = "
 let iter = fn (from, to, call, prev) => {
@@ -40,17 +41,35 @@ print(iteration)
 ";
 
 pub fn criterion_benchmark(c: &mut Criterion) {
-    let mut group = c.benchmark_group("rinha-bench");
-    group.sample_size(15);
-    group.bench_with_input(BenchmarkId::new("rinha-bench", "iterative"), &PERF_PROGRAM, |b, &program| {
-        let compiled = compile(&program);
 
-        b.iter(|| {
-            let mut ec = ExecutionContext::new(&compiled);
-            (compiled.main)(&mut ec);
-        });
-    });
+    let mut group = c
+      .benchmark_group("rinha-bench");
+    group.sample_size(15);
+    group.bench_with_input(
+        BenchmarkId::new("rinha-bench", "iterative"),
+        &PERF_PROGRAM,
+        |b, &program| {
+            let compiled = compile(&program);
+
+            b.iter(|| {
+                let mut ec = ExecutionContext::new(&compiled);
+                (compiled.main)(&mut ec);
+            });
+        },
+    );
 }
 
-criterion_group!(benches, criterion_benchmark);
-criterion_main!(benches);
+fn main(){
+    
+  // make Criterion listen to command line arguments
+  let c = Criterion::default().configure_from_args();
+  let str_unix_time = std::time::SystemTime::now()
+    .duration_since(std::time::UNIX_EPOCH)
+    .unwrap()
+    .as_secs()
+    .to_string();
+  let mut c = c.save_baseline(str_unix_time);
+
+  criterion_benchmark(&mut c);
+
+}

@@ -5,11 +5,16 @@ use crate::{
     parser::Var,
 };
 
+#[derive(Debug)]
+pub struct Stats {
+    pub new_frames: usize,
+    pub reused_frames: usize
+}
 
 #[derive(Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
 pub struct Closure {
     pub callable_index: usize,
-    pub environment: Vec<Value>
+  //  pub environment: Vec<Value>
 }
 
 /// Enum for runtime values
@@ -23,21 +28,9 @@ pub enum Value {
     Closure(Closure), //unhinged
     Error(String),
     Unit,
+    None
 }
 
-impl Value {
-    fn get_type(&self) -> Type {
-        match self {
-            Value::Int(_) => Type::Int,
-            Value::Str(_) => Type::Str,
-            Value::Tuple(..) => Type::Tuple,
-            Value::Closure(..) => Type::Function,
-            Value::Error(_) => Type::Error,
-            Value::Unit => Type::Unit,
-            Value::Bool(_) => Type::Bool,
-        }
-    }
-}
 
 impl ToString for Value {
     fn to_string(&self) -> String {
@@ -49,12 +42,13 @@ impl ToString for Value {
             Value::Error(e) => format!("error: {}", e),
             Value::Unit => "unit".to_string(),
             Value::Bool(b) => b.to_string(),
+            Value::None => "none".to_string()
         }
     }
 }
 
 pub struct StackFrame {
-    pub let_bindings: Vec<Value>,
+    pub let_bindings_pushed: Vec<usize>
 }
 
 pub struct Callable {
@@ -66,7 +60,9 @@ pub struct ExecutionContext<'a> {
     pub call_stack: Vec<StackFrame>,
     pub functions: &'a [Callable],
     pub enable_memoization: bool,
-    pub num_of_vars: usize
+    pub let_bindings: Vec<Vec<Value>>,
+    pub reusable_frames: Vec<StackFrame>,
+    pub stats: Stats
 }
 
 pub struct CompilationResult {
@@ -80,11 +76,16 @@ impl<'a> ExecutionContext<'a> {
     pub fn new(program: &'a CompilationResult) -> Self {
         Self {
             call_stack: vec![StackFrame {
-                let_bindings: vec![Value::Unit; program.strings.len()],
+                let_bindings_pushed: vec![]
             }],
             functions: &program.functions,
             enable_memoization: true,
-            num_of_vars: program.strings.len()
+            let_bindings: vec![vec![]; program.strings.len()],
+            reusable_frames: vec![],
+            stats: Stats {
+                new_frames: 1,
+                reused_frames: 0
+            }
         }
     }
 
@@ -183,16 +184,16 @@ impl LambdaCompiler {
             Term::Int(Int { value, .. }) => Box::new(move |_| {
                 return Value::Int(value);
             }),
-            Term::Var(Var { text, .. }) => {
+            Term::Var(Var { text, .. }) => { 
                 let varname_leaked: &'static str = text.leak();
                 let index = self.intern_string(varname_leaked);
 
                 Box::new(move |ec: &mut ExecutionContext| {
                     //@PERF no clone pls
                    // println!("Stack frame on var: {:?} trying to get var {varname_leaked}", ec.frame().let_bindings);
-                    let value = ec.frame().let_bindings.get(index);
-                    match value {
-                        Some(value) => value.clone(),
+                    let var_stack = ec.let_bindings.get(index);
+                    match var_stack {
+                        Some(value) => value.last().unwrap().clone(),
                         None => panic!("Variable {varname_leaked} not found"),
                     }
                 })
@@ -213,10 +214,21 @@ impl LambdaCompiler {
                     })
                 } else {
                     let var_name_leaked: &'static str = var_name.leak();
-                    let next_index = self.intern_string(var_name_leaked);
+                    let var_index = self.intern_string(var_name_leaked);
                     Box::new(move |ec: &mut ExecutionContext| {
                         let bound_value = evaluate_value(ec);
-                        ec.frame().let_bindings[next_index] = bound_value;
+                        let call_stack_index = ec.call_stack.len() - 1;
+                        //check if the value is already in the stack
+                        let frame_bindings = &mut ec.let_bindings[var_index];
+
+                        let var_in_stack = frame_bindings.get_mut(call_stack_index);
+                        if let Some(var_in_stack) = var_in_stack {
+                            *var_in_stack = bound_value;
+                        } else {
+                            frame_bindings.push(bound_value);
+                        }
+
+                        ec.frame().let_bindings_pushed.push(var_index);
                         //print stack frame
                         //println!("Stack frame: {:?}", ec.frame().let_bindings);
                         let next = evaluate_next(ec);
@@ -242,7 +254,7 @@ impl LambdaCompiler {
 
                             //println!("called {callee_function:?}");
 
-                            let Value::Closure(Closure{callable_index, environment}) = callee_function else {
+                            let Value::Closure(Closure{callable_index}) = callee_function else {
                                 panic!("Call to non-function value {called_name}")
                             };
                             {
@@ -253,35 +265,52 @@ impl LambdaCompiler {
                                 }
                             }
 
-                             //copy the environment to the let bindings of the new frame, they might be overriden by parameters
-                           
-                            let mut new_frame = StackFrame {
-                                let_bindings: environment.clone(),
-                            };
+                            //In this new stack frame, we push the function name, so we can do recursion.
+                            //To comply with the rest of the interpreter logic we also push the function name into the let bindings
+                            let mut new_frame = match ec.reusable_frames.pop() {
+                                Some(new_frame) => {
+                                    ec.stats.reused_frames += 1;
+                                    new_frame
+                                }
+                                None => {
+                                    ec.stats.new_frames += 1;
 
+                                    StackFrame{ let_bindings_pushed: vec![]}
+                                }
+                            };
                             
-                            //in the let bindings, add ourselves so we can do recursion
-                            new_frame.let_bindings[function_name_index] = Value::Closure(Closure { callable_index, environment });
+                            new_frame.let_bindings_pushed.push(function_name_index);
+
+                            ec.let_bindings[function_name_index].push(Value::Closure(Closure { callable_index }));
 
                             {
                                 let params = ec.functions[callable_index].parameters;
                                 //evaluate the arguments
                                 for (argument, param) in arguments.iter().zip(params) {
                                     let value = argument(ec);
-                                    new_frame.let_bindings[*param] = value;
+                                    new_frame.let_bindings_pushed.push(*param);
+                                    ec.let_bindings[*param].push(value);
                                 }
                             }
-                            
 
                             ec.push_frame(new_frame);
 
-                            //HACK: It's 3AM, this borrow is ok... trust me bro...
-                            //erase the lifetime of the function pointer
+                            
+                            //Erase the lifetime of the function pointer. This is a hack, forgive me for I have sinned.
+                            //Let it wreck havoc on the interpreter state if it wants.
                             let function: &Box<dyn Fn(&mut ExecutionContext) -> Value> = unsafe { std::mem::transmute(&ec.functions[callable_index].body) };
                             //let function = &ec.functions[callable_index].body;
                             let function_result = function(ec);
 
-                            ec.pop_frame();
+                            let mut popped_frame = ec.pop_frame();
+
+                            for let_binding in popped_frame.let_bindings_pushed.iter() {
+                                ec.let_bindings[*let_binding].pop();
+                            }
+                            popped_frame.let_bindings_pushed.clear();
+
+                            ec.reusable_frames.push(popped_frame);
+
                             return function_result;
                         })
                     }
@@ -306,9 +335,8 @@ impl LambdaCompiler {
                 let index_of_new_function = self.all_functions.len();
 
                 self.all_functions.push(callable);
-                Box::new(move |ec| {
-                    let environment = ec.frame().let_bindings.clone();
-                    Value::Closure(Closure { callable_index: index_of_new_function, environment })
+                Box::new(move |_| {
+                    Value::Closure(Closure { callable_index: index_of_new_function })
                 })
             }
             Term::If(If {condition, then, otherwise, ..}) => {
