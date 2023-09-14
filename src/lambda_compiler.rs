@@ -24,7 +24,11 @@ pub enum Value {
     Int(i32),
     Bool(bool),
     Str(String),
-    Tuple(Box<Value>, Box<Value>),
+    IntTuple(i32, i32),
+    BoolIntTuple(bool, i32),
+    IntBoolTuple(i32, bool),
+    BoolTuple(bool, bool),
+    DynamicTuple(Box<Value>, Box<Value>),
     Closure(Closure), //unhinged
     Error(String),
     Unit,
@@ -37,12 +41,16 @@ impl ToString for Value {
         match self {
             Value::Int(i) => i.to_string(),
             Value::Str(s) => s.to_string(),
-            Value::Tuple(a, b) => format!("({}, {})", a.to_string(), b.to_string()),
+            Value::DynamicTuple(a, b) => format!("({}, {})", a.to_string(), b.to_string()),
+            Value::IntTuple(a, b) => format!("({}, {})", a.to_string(), b.to_string()),
+            Value::BoolTuple(a, b) => format!("({}, {})", a.to_string(), b.to_string()),
+            Value::IntBoolTuple(a, b) => format!("({}, {})", a.to_string(), b.to_string()),
+            Value::BoolIntTuple(a, b) => format!("({}, {})", a.to_string(), b.to_string()),
             Value::Closure(..) => "function".to_string(),
             Value::Error(e) => format!("error: {}", e),
             Value::Unit => "unit".to_string(),
             Value::Bool(b) => b.to_string(),
-            Value::None => "none".to_string()
+            Value::None => "none".to_string(),
         }
     }
 }
@@ -358,7 +366,8 @@ impl LambdaCompiler {
                 Box::new(move |ec: &mut ExecutionContext| {
                     let value = evaluate_value(ec);
                     match value {
-                        Value::Tuple(a, _) => *a,
+                        Value::DynamicTuple(a, _) => *a,
+                        Value::IntTuple(a, _) => Value::Int(a),
                         _ => panic!("Type error: Cannot evaluate first on this value: {value:?}"),
                     }
                 })
@@ -368,7 +377,8 @@ impl LambdaCompiler {
                 Box::new(move |ec: &mut ExecutionContext| {
                     let value = evaluate_value(ec);
                     match value {
-                        Value::Tuple(_, a) => *a,
+                        Value::DynamicTuple(_, a) => *a,
+                        Value::IntTuple(_, a) => Value::Int(a),
                         _ => panic!("Type error: Cannot evaluate first on this value: {value:?}"),
                     }
                 })
@@ -380,7 +390,15 @@ impl LambdaCompiler {
                 let evaluate_first = self.compile_internal(*first);
                 let evaluate_second = self.compile_internal(*second);
                 Box::new(move |ec: &mut ExecutionContext| {
-                    Value::Tuple(Box::new(evaluate_first(ec)), Box::new(evaluate_second(ec)))
+                    let f = evaluate_first(ec);
+                    let s = evaluate_second(ec);
+                    match (f, s) {
+                        (Value::Int(a), Value::Int(b)) => Value::IntTuple(a, b),
+                        (Value::Bool(a), Value::Bool(b)) => Value::BoolTuple(a, b),
+                        (Value::Int(a), Value::Bool(b)) => Value::IntBoolTuple(a, b),
+                        (Value::Bool(a), Value::Int(b)) => Value::BoolIntTuple(a, b),
+                        (a, b) => Value::DynamicTuple(Box::new(a), Box::new(b))
+                    }
                 })
             }
         };
