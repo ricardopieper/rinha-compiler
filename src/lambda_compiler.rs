@@ -322,36 +322,6 @@ impl<'a> ExecutionContext<'a> {
         self.reusable_frames.push(popped_frame);
     }
 
-    //This frame returned a trampoline, but the values in the stack
-    //are still alive. In order for the trampoline to execute,
-    //the execution must end and backtrack to the original caller, which will run
-    //the trampoline. However, the values in the stack must still be there, so that 
-    //the trampoline can load the function args. However, if we don't do anything, 
-    //the trampoline won't execute because of the anti-recursion mechanism that is 
-    //based on the current function index, and whose function the trampoline belongs to.
-
-    //Therefore instead of popping the frame, we actually create a new frame with the 
-    //trampoline function id. This retains the stack frame, emulates recursion, and 
-    //changes the current function ID so that the trampoline is allowed to run.
-    fn make_trampoline_frame(&mut self, callable_index: usize) {
-        let new_frame = match self.reusable_frames.pop() {
-            Some(mut new_frame) => {
-                self.stats.reused_frames += 1;
-                new_frame.function = callable_index;
-                new_frame
-            }
-            None => {
-                self.stats.new_frames += 1;
-
-                StackFrame {
-                    function: callable_index,
-                    let_bindings_pushed: vec![],
-                }
-            }
-        };
-        self.push_frame(new_frame);
-    }
-
     fn make_new_frame(&mut self, function_name_index: usize, callable_index: usize, arguments: &[LambdaFunction]) {
         let mut new_frame = match self.reusable_frames.pop() {
             Some(mut new_frame) => {

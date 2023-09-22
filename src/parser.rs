@@ -7,7 +7,7 @@ use miette::{NamedSource, SourceSpan};
 ///
 /// It's useful to know the location of the name in the source code
 /// and the name itself to be resolved later.
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
 pub struct Var {
     pub text: String,
     pub location: Location,

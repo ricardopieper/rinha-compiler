@@ -5,7 +5,6 @@ pub mod hir;
 pub mod lambda_compiler;
 pub mod ast;
 pub mod parser;
-pub mod typing;
 
 
 // The lalrpop module, it does generate the parser and lexer

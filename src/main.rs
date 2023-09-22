@@ -8,6 +8,7 @@ use clap::Parser;
 use lalrpop_util::lalrpop_mod;
 use miette::IntoDiagnostic;
 use owo_colors::OwoColorize;
+use crate::ast::File;
 
 // The lalrpop module, it does generate the parser and lexer
 // for the language.
@@ -29,8 +30,6 @@ pub mod hir;
 
 pub mod lambda_compiler;
 
-pub mod typing;
-
 /// Simple program to run `rinha` language.
 #[derive(clap::Parser, Debug)]
 #[command(author, version, about, long_about = None)]
@@ -41,6 +40,9 @@ pub struct Command {
 
     /// The file we would like to run, type check, etc
     pub main: String,
+
+    #[clap(long, short, default_value = "true")]
+    pub rinha_mode: bool,
 }
 
 /// Logger function for the fern logger.
@@ -84,30 +86,40 @@ fn program() -> miette::Result<()> {
     // Parse the command line arguments
     let command = Command::parse();
     let file = std::fs::read_to_string(&command.main).into_diagnostic()?;
-    let file = crate::parser::parse_or_report(&command.main, &file)?;
-    let end = std::time::Instant::now();
+    if command.rinha_mode {
 
-    println!("Parse Time: {:?}", end - start);
-    let start = std::time::Instant::now();
+        //deserialize into file
 
-    let compiler = lambda_compiler::LambdaCompiler::new();
-    let hir = crate::hir::ast_to_hir(file.expression);
-    let program = compiler.compile(hir);
-    let end = std::time::Instant::now();
+        let file: File = serde_json::from_str(&file).into_diagnostic()?;
+        let compiler = lambda_compiler::LambdaCompiler::new();
+        let hir = hir::ast_to_hir(file.expression);
+        let program = compiler.compile(hir);
+        let mut ee = lambda_compiler::ExecutionContext::new(&program);
+        (program.main)(&mut ee);
 
-    println!("Compile Time: {:?}", end - start);
-    let mut ee = lambda_compiler::ExecutionContext::new(&program);
-
-    //sleep 5s
-    //std::thread::sleep(std::time::Duration::from_secs(5));
-    let start = std::time::Instant::now();
-    (program.main)(&mut ee);
-    let end = std::time::Instant::now();
-    println!("Run Time: {:?}", end - start);
-
-
-    println!("Stats: {:#?}", ee.stats);
-
+    } else {
+     
+        let file = crate::parser::parse_or_report(&command.main, &file)?;
+        let end = std::time::Instant::now();
+    
+        println!("Parse Time: {:?}", end - start);
+        let start = std::time::Instant::now();
+    
+        let compiler = lambda_compiler::LambdaCompiler::new();
+        let hir = hir::ast_to_hir(file.expression);
+        let program = compiler.compile(hir);
+        let end = std::time::Instant::now();
+    
+        println!("Compile Time: {:?}", end - start);
+        let mut ee = lambda_compiler::ExecutionContext::new(&program);
+    
+        let start = std::time::Instant::now();
+        (program.main)(&mut ee);
+        let end = std::time::Instant::now();
+        println!("Run Time: {:?}", end - start);
+        println!("Stats: {:#?}", ee.stats);
+    
+    }
     Ok(())
 }
 
