@@ -1,0 +1,472 @@
+Based on perf.rinha. Looping should be something we can type and potentially optimize with llvm or interpreter TCO.
+
+let iter = fn (from, to, call, prev) => {
+  if (from < to) {
+    let res = call(from);
+    iter(from + 1, to, call, res)
+  } else {
+    prev
+  }
+};
+
+//wherever there's a dyn, we have a type slot
+
+let iter[initial inference] = fn (from:dyn, to: dyn, call: dyn, prev: dyn) -> dyn => {
+  if (from < to) { //both sides are dynamic, cannot infer yet
+    let res = call(from); //call must be at least fn(dyn) -> dyn
+    iter(from + 1, to, call, res) 
+  } else {
+    prev
+  }
+};
+
+
+let iter[initial inference] = fn (from:dyn, to: dyn, call: fn(dyn) -> dyn, prev: dyn) -> dyn => {
+  if (from < to) { 
+    let res: dyn = call(from); //we can infer res is dyn
+    iter(from + 1, to, call, res) 
+  } else {
+    prev
+  }
+};
+
+let iter[initial inference] = fn (from:dyn, to: dyn, call: fn(dyn) -> dyn, prev: dyn) -> dyn => {
+  if (from < to) {
+    let res: dyn = call(from);
+    iter(from + 1, to, call, res) //from + 1 means from is string | int
+  } else {
+    prev
+  }
+};
+
+let iter[initial inference] = fn (from: string|int, to: dyn, call: fn(dyn) -> dyn, prev: dyn) -> dyn => {
+  if (from < to) { //left side of < can only be int, so we choose int from the constraints of from. This implies to is also int
+    let res: dyn = call(from);
+    iter(from + 1, to, call, res)
+  } else {
+    prev
+  }
+};
+
+let iter[initial inference] = fn (from: int, to: int, call: fn(dyn) -> dyn, prev: dyn) -> dyn => {
+  if (from < to) {
+    let res: dyn = call(from); //from is int, call has a dyn slot for its parameter, let's infer it 
+    iter(from + 1, to, call, res)
+  } else {
+    prev
+  }
+};
+
+let iter[initial inference] = fn (from: int, to: int, call: fn(int) -> dyn, prev: dyn) -> dyn => {
+  if (from < to) { //inferred
+    let res: dyn = call(from); //inferred
+    iter(from + 1, to, call, res) //inferred
+  } else {
+    prev //inferred
+  }
+};
+
+(int, int, fn(int) -> dyn, dyn) -> dyn
+let iter[current prototype] = fn (from: int, to: int, call: fn(int) -> dyn, prev: dyn) -> dyn => {
+  if (from < to) { //inferred
+    let res: dyn = call(from); //inferred
+    iter(from + 1, to, call, res) //inferred
+  } else {
+    prev //inferred
+  }
+};
+//thus we have inferred iter, it has a couple of free type slots.... functions can take advantage of this
+
+let work = fn(x) => {
+  let work_closure = fn(y) => {
+    let xx = x * y;
+    let tupl = (xx, x);
+    let f = first(tupl);
+    let s = second(tupl);
+    f * s
+  };
+
+  iter(0, 800, work_closure, 0)
+};
+
+let work[initial inferrence] = fn(x) => {
+  let work_closure = fn(y) => {
+    let xx = x * y;
+    let tupl = (xx, x);
+    let f = first(tupl);
+    let s = second(tupl);
+    f * s
+  };
+
+  iter(0, 800, work_closure, 0)
+};
+
+
+
+let work[initial inferrence] = fn(x) => {
+  let work_closure[initial_inferrence] = fn(y) => {
+    let xx = x * y;
+    let tupl = (xx, x);
+    let f = first(tupl);
+    let s = second(tupl);
+    f * s
+  }; //work_closure is at least fn(dyn) -> dyn
+
+  iter(0, 800, work_closure, 0)
+};
+
+
+let work[initial inferrence] = fn(x) => {
+  let work_closure[initial_inferrence] = fn(y: dyn) -> dyn => {
+    let xx = x * y;
+    let tupl = (xx, x);
+    let f = first(tupl);
+    let s = second(tupl);
+    f * s
+  }; //work_closure is at least fn(dyn) -> dyn
+
+  //but work_close is passed to iter, the type mismatch implies work_closure is fn(int) -> dyn, also the last parameter is int, generate a new prototype 
+  //notice it's still dyn
+  iter(0, 800, work_closure, 0)
+};
+
+[generate a copy of iter, with new implications: (int, int, (int) -> dyn, int) -> dyn]
+
+let iter[for work] = fn (from: int, to: int, call: fn(int) -> dyn, prev: int) -> dyn => {
+  if (from < to) { //matches
+    let res: dyn = call(from); res is dyn still
+    iter(from + 1, to, call, res) //called with (int, int, (int) -> dyn, dyn), 
+    // during a prototype copy we enforce the new parameters, implications can flow backwards. Res was passed to an int parameter, so res must be int
+  } else {
+    prev 
+  }
+};
+
+let iter[for work] = fn (from: int, to: int, call: fn(int) -> dyn, prev: int) -> dyn => {
+  if (from < to) { //matches
+    let res: int = call(from); res gets reinferred
+    iter(from + 1, to, call, res) 
+  } else {
+    prev
+  }
+};
+
+
+let iter[for work] = fn (from: int, to: int, call: fn(int) -> dyn, prev: int) -> dyn => {
+  if (from < to) {
+    let res: int = call(from); 
+    iter(from + 1, to, call, res) //iter called with (int, int, fn(int) -> dyn, int), this matches us, no implications for now
+  } else {
+    prev
+  }
+};
+
+let iter[for work] = fn (from: int, to: int, call: fn(int) -> dyn, prev: int) -> dyn => {
+  if (from < to) {
+    let res: int = call(from);  //if the result variable of a call changed, we must reinfer this call
+    iter(from + 1, to, call, res)
+  } else {
+    prev
+  }
+};
+
+let iter[for work] = fn (from: int, to: int, call: fn(int) -> dyn, prev: int) -> dyn => {
+  if (from < to) {
+    let res: int = call(from);  //but this would require call to change to fn(int -> int)
+    iter(from + 1, to, call, res)
+  } else {
+    prev
+  }
+};
+
+let iter[for work] = fn (from: int, to: int, call: fn(int) -> int, prev: int) -> dyn => { //inferred!
+  if (from < to) { //inferred
+    let res: int = call(from); //inferred
+    iter(from + 1, to, call, res) //inferred, returns dyn
+  } else {
+    prev //returns int
+  }
+};
+
+let iter[for work] = fn (from: int, to: int, call: fn(int) -> int, prev: int) -> dyn => { //inferred!
+  if (from < to) { //inferred
+    let res: int = call(from); //inferred
+    iter(from + 1, to, call, res) //inferred, returns dyn
+  } else {
+    prev
+  } //one branch of the if returns int instead of dyn, since this is the return type of the function, we must change the return type too
+};
+
+let iter[for work] = fn (from: int, to: int, call: fn(int) -> int, prev: int) -> int => { //changed the ret type
+  if (from < to) { 
+    let res: int = call(from);
+    iter(from + 1, to, call, res) 
+  } else {
+    prev
+  } 
+};
+
+let iter[for work] = fn (from: int, to: int, call: fn(int) -> int, prev: int) -> int => {
+  if (from < to) {  //inferred
+    let res: int = call(from); //inferred
+    iter(from + 1, to, call, res) // there must be iter(int, int, fn(int) -> int, int) -> int, and there is... it's us
+  } else {
+    prev
+  } 
+};
+
+let iter[for work] = fn (from: int, to: int, call: fn(int) -> int, prev: int) -> int => {
+  if (from < to) {  //inferred
+    let res: int = call(from); //inferred
+    iter(from + 1, to, call, res) //inferred
+  } else {
+    prev //inferred
+  } //if returns int | int, which is just int :)
+};
+
+
+let work[initial inferrence] = fn(x) => {
+  let work_closure[initial_inferrence] = fn(y: dyn) -> dyn => {
+    let xx = x * y;
+    let tupl = (xx, x);
+    let f = first(tupl);
+    let s = second(tupl);
+    f * s
+  }; //work_closure is at least fn(dyn) -> dyn
+
+  //our iter is now (int, int, fn(int) -> int, int) -> int
+  iter(0, 800, work_closure, 0)
+};
+
+//This showed a way to infer iter alone given a signature, but in reality we might just do this:
+
+let work[initial inferrence] = fn(x) => {
+  let work_closure[initial_inferrence] = fn(y: dyn) -> dyn => {
+    let xx = x * y;
+    let tupl = (xx, x);
+    let f = first(tupl);
+    let s = second(tupl);
+    f * s
+  }; //work_closure is at least fn(dyn) -> dyn
+
+  iter(0, 800, work_closure, 0)
+};
+
+
+let work[initial inferrence] = fn(x) => {
+  let work_closure[initial_inferrence] = fn(y: dyn) -> dyn => {
+    let xx = x * y; // * only exists for int, int. Implies: closure param x: int, param y: int
+    let tupl = (xx, x);
+    let f = first(tupl);
+    let s = second(tupl);
+    f * s
+  };
+
+  iter(0, 800, work_closure, 0)
+};
+
+
+let work[initial inferrence] = fn(x) => {
+  let work_closure[initial_inferrence] = fn(y: int) -> dyn => { //changed y
+    let xx = x * y;
+    let tupl = (xx, x);
+    let f = first(tupl);
+    let s = second(tupl);
+    f * s
+  }; // this is secretly implying x: int, but hold it...
+
+  iter(0, 800, work_closure, 0)
+};
+
+
+let work[initial inferrence] = fn(x) => {
+  let work_closure[initial_inferrence] = fn(y: int) -> dyn => { //changed y
+    let xx: int = x * y; //xx is int
+    let tupl: (int, int) = (xx, x); //implies tupl = (int, int)
+    let f = first(tupl); = //implies f = (int)
+    let s = second(tupl); //implies s = int
+    f * s //implies f * s = int, which implies return type of this function = int
+  }; // this is secretly implying x: int, but hold it...
+
+  iter(0, 800, work_closure, 0)
+};
+
+
+let work[initial inferrence] = fn(x) => {
+  let work_closure[initial_inferrence] = fn(y: int) -> int => { //changed y
+    let xx: int = x * y; 
+    let tupl: (int, int) = (xx, x);
+    let f = first(tupl); 
+    let s = second(tupl);
+    f * s 
+  }; //finally process the implication that x: int
+
+  iter(0, 800, work_closure, 0)
+};
+
+
+let work[initial inferrence] = fn(x: int) => {
+  let work_closure[initial_inferrence] = fn(y: int) -> int => { //changed y
+    let xx: int = x * y; 
+    let tupl: (int, int) = (xx, x);
+    let f = first(tupl); 
+    let s = second(tupl);
+    f * s 
+  };
+
+
+  //iter being called with int, int, fn(int) -> int, int
+  iter(0, 800, work_closure, 0)
+};
+
+//the iter prototype is:
+let iter[current prototype] = fn (from: int, to: int, call: fn(int) -> dyn, prev: dyn) -> dyn => {
+  if (from < to) {
+    let res: dyn = call(from); 
+    iter(from + 1, to, call, res) : dyn
+  } else {
+    prev: dyn
+  }
+};
+
+//copy the prototype and add new implications: 
+//int, int, fn(int) -> int, int, if all parameters are typed then we must infer the return type
+
+let iter[current prototype] = fn (from: int, to: int, call: fn(int) -> int, prev: int) -> dyn => {
+  if (from < to) { //inferred
+    let res: dyn = call(from); //call returns int... so res = int
+    iter(from + 1, to, call, res) : dyn
+  } else {
+    prev: dyn
+  }
+};
+
+let iter[current prototype] = fn (from: int, to: int, call: fn(int) -> int, prev: int) -> dyn => {
+  if (from < to) { //inferred
+    let res: int = call(from);
+    iter(from + 1, to, call, res) : dyn //we are calling int, int, fn(int) -> int, int and returning dyn
+  } else {
+    prev: dyn
+  }
+};
+
+let iter[current prototype] = fn (from: int, to: int, call: fn(int) -> int, prev: int) -> dyn => {
+  if (from < to) { //inferred
+    let res: int = call(from);
+    iter(from + 1, to, call, res) : dyn //we are calling int, int, fn(int) -> int, int and returning dyn, but this line is a special dyn that can be replaced
+  } else {
+    prev //this is int
+  }
+};
+
+let iter[current prototype] = fn (from: int, to: int, call: fn(int) -> int, prev: int) -> dyn => {
+  if (from < to) { //inferred
+    let res: int = call(from);
+    iter(from + 1, to, call, res) : dyn
+  } else {
+    prev : int
+  } //this if returns dyn | int
+};
+
+let iter[current prototype] = fn (from: int, to: int, call: fn(int) -> int, prev: int) -> dyn => {
+  //If the function returns dyn, and the body expression returns int | replaceable dyn, then we are int
+  if (from < to) { //inferred
+    let res: int = call(from);
+    iter(from + 1, to, call, res) : dyn
+  } else {
+    prev : int
+  }
+};
+
+//we changed whe function signature, reinfer 
+let iter[current prototype] = fn (from: int, to: int, call: fn(int) -> int, prev: int) -> int => {
+  if (from < to) { 
+    let res: int = call(from);
+    iter(from + 1, to, call, res) : dyn
+  } else {
+    prev : int
+  }
+};
+
+
+
+let iter[current prototype] = fn (from: int, to: int, call: fn(int) -> int, prev: int) -> int => {
+  if (from < to) { //inferred
+    let res: int = call(from); //inferred
+    iter(from + 1, to, call, res) //inferred
+  } else {
+    prev //inferred
+  } //inferred int | int, which is just int
+};
+
+
+
+
+let work[initial inferrence] = fn(x: int) -> dyn => {
+  let work_closure[initial_inferrence] = fn(y: int) -> int => {
+    let xx: int = x * y; 
+    let tupl: (int, int) = (xx, x);
+    let f = first(tupl); 
+    let s = second(tupl);
+    f * s 
+  };
+
+
+  //iter was inferred as (int, int, int->int, int) -> int
+  iter(0, 800, work_closure, 0)
+};
+
+let work[initial inferrence] = fn(x: int) -> dyn => {
+  let work_closure[initial_inferrence] = fn(y: int) -> int => {
+    let xx: int = x * y; 
+    let tupl: (int, int) = (xx, x);
+    let f = first(tupl); 
+    let s = second(tupl);
+    f * s 
+  };
+
+
+  //this call therefore returns type int, which changes the signature of the work function
+  iter(0, 800, work_closure, 0)
+};
+
+let work[initial inferrence] = fn(x: int) -> int => {
+  let work_closure[initial_inferrence] = fn(y: int) -> int => {
+    let xx: int = x * y; 
+    let tupl: (int, int) = (xx, x);
+    let f = first(tupl); 
+    let s = second(tupl);
+    f * s 
+  };
+
+
+  //this call therefore returns type int, which changes the signature of the function
+  iter(0, 800, work_closure, 0)
+};
+
+//this will reinfer everything again...
+let work[initial inferrence] = fn(x: int) -> int => {
+  let work_closure[initial_inferrence] = fn(y: int) -> int => {
+    let xx: int = x * y; 
+    let tupl: (int, int) = (xx, x);
+    let f = first(tupl); 
+    let s = second(tupl);
+    f * s 
+  };
+
+  iter(0, 800, work_closure, 0)
+};
+
+//everything checks
+
+//calling iter(int, int, (int) -> int, int), there is one with a return type int fully inferred, therefore iteration = int
+let iteration = iter(0, 300, work, 0);
+
+0
+
+
+
+
+
+
+

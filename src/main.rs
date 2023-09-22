@@ -1,6 +1,8 @@
 #![feature(box_patterns)]
 #![feature(type_changing_struct_update)]
 #![recursion_limit = "256"]
+#![feature(assert_matches)]
+#![feature(let_chains)]
 
 use clap::Parser;
 use lalrpop_util::lalrpop_mod;
@@ -25,6 +27,9 @@ pub mod ast;
 pub mod parser;
 
 pub mod lambda_compiler;
+
+pub mod hir;
+pub mod typing;
 
 /// Simple program to run `rinha` language.
 #[derive(clap::Parser, Debug)]
@@ -58,7 +63,7 @@ fn log(out: fern::FormatCallback, message: &std::fmt::Arguments, record: &log::R
 
 /// The main function of the program.
 fn program() -> miette::Result<()> {
-
+    let start = std::time::Instant::now();
     // Initialize the bupropion handler with miette
     bupropion::BupropionHandlerOpts::install(|| {
         // Build the bupropion handler options, for specific
@@ -80,16 +85,24 @@ fn program() -> miette::Result<()> {
     let command = Command::parse();
     let file = std::fs::read_to_string(&command.main).into_diagnostic()?;
     let file = crate::parser::parse_or_report(&command.main, &file)?;
+    let end = std::time::Instant::now();
+
+    println!("Parse Time: {:?}", end - start);
+    let start = std::time::Instant::now();
 
     let compiler = lambda_compiler::LambdaCompiler::new();
     let program = compiler.compile(file.expression);
+    let end = std::time::Instant::now();
 
+    println!("Compile Time: {:?}", end - start);
     let mut ee = lambda_compiler::ExecutionContext::new(&program);
 
     //sleep 5s
     //std::thread::sleep(std::time::Duration::from_secs(5));
-
+    let start = std::time::Instant::now();
     (program.main)(&mut ee);
+    let end = std::time::Instant::now();
+    println!("Run Time: {:?}", end - start);
 
 
     println!("Stats: {:#?}", ee.stats);

@@ -1,0 +1,837 @@
+use std::collections::HashMap;
+
+use rinha::{
+    ast::BinaryOp,
+    hir::{ClosureType, Expr, FuncDecl, Type},
+};
+
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct ClosureType {
+    pub params: Vec<(String, Type)>,
+    pub ret: Box<Type>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum Type {
+    Int,
+    Bool,
+    String,
+    Tuple(Box<Type>, Box<Type>),
+    Either(Box<Type>, Box<Type>),
+    Function(ClosureType),
+    Dynamic,
+}
+
+
+pub fn print_type(t: &Type) -> String {
+    match t {
+        Type::Int => "int".to_string(),
+        Type::Bool => "bool".to_string(),
+        Type::String => "str".to_string(),
+        Type::Tuple(left, right) => format!("({}, {})", print_type(left), print_type(right)),
+        Type::Function(ClosureType { params, ret }) => format!(
+            "fn({}) -> {}",
+            params
+                .iter()
+                .map(|x| print_type(&x.1))
+                .collect::<Vec<_>>()
+                .join(", "),
+            print_type(ret)
+        ),
+        Type::Dynamic => "dyn".to_string(),
+        Type::Either(x, y) => format!("{} | {}", print_type(x), print_type(y)),
+    }
+}
+
+pub fn print_expr(e: &Expr) -> String {
+    return print_expr_internal(e, "");
+}
+
+fn print_expr_internal(e: &Expr, indent: &str) -> String {
+    match e {
+        Expr::Let {
+            name,
+            value,
+            next,
+        } => {
+            format!(
+                "{indent}let {name}: {let_type} = {printed_subexpr};\n{indent}{printed_next}",
+                printed_subexpr = print_expr_internal(value, &format!("{}  ", indent)),
+                printed_next = print_expr_internal(next, indent),
+                let_type = print_type(let_type),
+            )
+        }
+        Expr::Var { name } => {
+            format!("{name} [{ty}]", ty = print_type(ty))
+        }
+        Expr::Int { value } => format!("{}", value),
+        Expr::Bool { value } => format!("{}", value),
+        Expr::String { value } => format!("{:?}", value),
+        Expr::If {
+            cond,
+            then,
+            otherwise
+        } => {
+            let cond = print_expr_internal(cond, &format!("{}  ", indent));
+            let then = print_expr_internal(then, &format!("{}  ", indent));
+            let otherwise = print_expr_internal(otherwise, &format!("{}  ", indent));
+            format!("if ({cond}) {{\n{indent}{indent}{then}\n{indent}}} else {{\n{indent}{indent}{otherwise}\n{indent}}} [{ty}]", 
+                ty = print_type(ty),
+                indent = indent
+            )
+        }
+        Expr::Tuple { first, second } => {
+            let f = print_expr_internal(first, indent);
+            let s = print_expr_internal(second, indent);
+            let f_ty = first.get_type();
+            let s_ty = second.get_type();
+            format!(
+                "({f} [{f_ty}], {s} [{s_ty}]) [{ty}]",
+                f_ty = print_type(&f_ty),
+                s_ty = print_type(&s_ty),
+                ty = print_type(ty),
+            )
+        }
+        Expr::First { value } => {
+            let v = print_expr_internal(value, indent);
+            let v_ty = value.get_type();
+            format!(
+                "first({v} [{v_ty}])[{ty}]",
+                v_ty = print_type(&v_ty),
+                ty = print_type(ty),
+            )
+        }
+        Expr::Second { value } => {
+            let v = print_expr_internal(value, indent);
+            let v_ty = value.get_type();
+            format!(
+                "second({v} [{v_ty}])[{ty}]",
+                v_ty = print_type(&v_ty),
+                ty = print_type(ty),
+            )
+        }
+        Expr::Print { value } => {
+            let v = print_expr_internal(value, indent);
+            let v_ty = value.get_type();
+            format!(
+                "print({v} [{v_ty}]) [{ty}]",
+                v_ty = print_type(&v_ty),
+                ty = print_type(ty),
+            )
+        }
+        Expr::FuncDecl(FuncDecl {
+            name,
+            params,
+            body
+        }) => {
+            let b = print_expr_internal(body, indent);
+            let b_ty = body.get_type();
+            format!(
+                "fn {name}({args}) -> {return_ty} {{\n{indent}{b}\n}} [body type = {b_ty}]",
+                name = name,
+                args = params
+                    .iter()
+                    .map(|(arg_name, ty)| format!("{}: {}", arg_name, print_type(ty)))
+                    .collect::<Vec<_>>()
+                    .join(", "),
+                return_ty = print_type(return_ty),
+                b = b,
+                b_ty = print_type(&b_ty),
+            )
+        }
+        Expr::FuncCall { name, args } => {
+            let mut printed_args = vec![];
+            for arg in args {
+                printed_args.push(print_expr_internal(arg, indent));
+            }
+            format!(
+                "{name}({printed_args}) [{ty}]",
+                name = name,
+                printed_args = printed_args.join(", "),
+                ty = print_type(ty)
+            )
+        }
+        Expr::BinOp {
+            op,
+            left,
+            right,
+        } => {
+            let l = print_expr_internal(left, indent);
+            let r = print_expr_internal(right, indent);
+
+            format!(
+                "{l} {op} {r} [{ty}]",
+                l = l,
+                r = r,
+                op = operator_to_str(op),
+                ty = print_type(ty)
+            )
+        }
+    }
+}
+
+fn operator_to_str(op: &BinaryOp) -> &'static str {
+    match op {
+        BinaryOp::Add => "+",
+        BinaryOp::Sub => "-",
+        BinaryOp::Mul => "*",
+        BinaryOp::Div => "/",
+        BinaryOp::Rem => "%",
+        BinaryOp::Eq => "==",
+        BinaryOp::Neq => "!=",
+        BinaryOp::Lt => "<",
+        BinaryOp::Gt => ">",
+        BinaryOp::Lte => "<=",
+        BinaryOp::Gte => ">=",
+        BinaryOp::And => "&&",
+        BinaryOp::Or => "||",
+    }
+}
+
+pub struct Typer {
+    //let_bindings_types: HashMap<String, Type>,
+    functions: Vec<Function>
+}
+
+pub enum Implication {
+    ImplyLetType(String, Type),
+    ImplyCallReturnType(String, Type),
+    ImplyFunctionReturnType(Type),
+    ImplyParameterOfFunction(String, Type),
+    NoImplication,
+}
+
+pub struct Function {
+    id: usize,
+
+    //The value is a shadow stack, it gets pushed and popped as the source is being processed.
+    //When we find a let binding, we push to the stack. When we enter an if statement, the insides are popped when the scope ends.
+    let_bindings: HashMap<String, Vec<Type>>,
+
+    //Scopes and bindings declared in that scope
+    current_scope_specific_bindings: Vec<Vec<String>>,
+
+    //Parameters of the function, can change according to implications
+    parameters: Vec<(String, Type)>,
+
+    //Return type of the function, can change according to implications
+    return_type: Type,
+
+    //Functions inside functions have a scope appended to them
+    fully_qualified_name: String,
+
+    //These are detected as we process the source
+    closure_implications: HashMap<String, Type>,
+
+    //this is the latest let bindings (stack peeks) of the moment when the function was declared
+    closes_over: HashMap<String, Type>,
+}
+
+impl Function {
+    pub fn push_binding(&mut self, name: &str, ty: Type) {
+        let stack = self.let_bindings.get_mut(name);
+        match stack {
+            Some(vec) => {
+                vec.push(ty);
+            }
+            None => {
+                self.let_bindings.insert(name.to_string(), vec![ty]);
+                self.current_scope_specific_bindings
+                    .last_mut()
+                    .unwrap()
+                    .push(name.to_string())
+            }
+        };
+    }
+
+    pub fn find_name(&self, name: &str) -> &Type {
+        let binding = self.try_get_binding(name);
+        if let Some(b) = binding {
+            return b;
+        };
+    
+        let param = self.try_get_parameter(name);
+        if let Some(b) = param {
+            return b
+        };
+
+        let closure_param = self.try_get_closure_parameter(name);
+        if let Some(b) = closure_param {
+            return b
+        };
+
+        panic!("Could not find name {name}")
+    }
+
+    pub fn get_binding(&mut self, name: &str) -> &Type {
+        match self.try_get_binding(name) {
+            Some(b) => b,
+            None => panic!("Variable {name} not found")
+        }
+    }
+
+    pub fn try_get_binding(&self, name: &str) -> Option<&Type> {
+        self.let_bindings.get(name).and_then(|x| x.last())
+    }
+
+    pub fn change_current_binding(&mut self, name: &str, ty: Type) {
+        let current = self.let_bindings.get_mut(name).unwrap().last_mut().unwrap();
+        *current = ty;
+    }
+
+    pub fn try_get_parameter(&self, name: &str) -> Option<&Type> {
+        self.parameters
+            .iter()
+            .find(|(param_name, ty)| param_name == name)
+            .map(|x| &x.1)
+    }
+
+    pub fn try_get_closure_parameter(&self, name: &str) -> Option<&Type> {
+        self.closes_over.get(name)
+    }
+
+    //Call this when entering a new scope
+    pub fn push_scope(&mut self) {
+        self.current_scope_specific_bindings.push(vec![]);
+    }
+
+    //Call this when leaving a scope
+    pub fn pop_scope(&mut self) {
+        let popped = self.current_scope_specific_bindings.pop().unwrap();
+        for binding in popped {
+            self.let_bindings.get_mut(&binding).unwrap().pop();
+        }
+    }
+
+    pub fn build_closure_bindings(&self) -> HashMap<String, Type> {
+        let mut closure_bindings = HashMap::<String, Type>::new();
+        for (binding, stack) in self.let_bindings.iter() {
+            closure_bindings.insert(binding.to_string(), stack.last().cloned().unwrap());
+        }
+        return closure_bindings;
+    }
+
+    pub fn create_closure(&self, decl: &FuncDecl) -> Function {
+        let FuncDecl {
+            name,
+            params,
+            body,
+        } = decl;
+        let args = params
+            .clone()
+            .iter()
+            .map(|(name, ty)| (name.clone(), ty.clone()))
+            .collect::<Vec<_>>();
+
+        let mut new_function = Function {
+            id: self.id + 1,
+            return_type: return_ty.clone(),
+            parameters: args,
+            closes_over: self.build_closure_bindings(),
+            current_scope_specific_bindings: vec![vec![]],
+            closure_implications: HashMap::new(),
+            fully_qualified_name: format!("{}::{}", self.fully_qualified_name, name),
+            let_bindings: HashMap::new(),
+        };
+
+       ;
+        new_function.closes_over.insert(name.to_string(),  Type::Function(ClosureType {
+            params: new_function.parameters.clone(),
+            ret: return_ty.clone().into(),
+        }));
+
+        new_function
+    }
+
+    fn process_implications(&mut self, implications: &mut Vec<Implication>) {
+        for implication in implications {
+            match implication {
+                Implication::ImplyLetType(var, ty) => {
+                    let can_change_binding = {
+                        let binding = self.get_binding(var);
+                        //you can only accept this implication if the current binding is dyn or the implication agrees with the current state
+                        &Type::Dynamic == binding || ty == binding
+                    };
+                    if can_change_binding {
+                        self.change_current_binding(var, ty.clone());
+                    } else {
+                        panic!("Variable {var} was already inferred before as a type different than {ty}, cannot switch types", ty = print_type(ty))
+                    }
+                }
+                Implication::ImplyParameterOfFunction(name, ty) => {
+                    for (param_name, current_ty) in self.parameters.iter_mut() {
+                        if name == param_name {
+                            if current_ty == &Type::Dynamic || current_ty == ty {
+                                *current_ty = ty.clone();
+                            } else {
+                                panic!("Function parameter {name} was already inferred before as a type different than {current_ty}, cannot switch types", current_ty = print_type(current_ty))
+                            }
+                        }
+                    }
+                }
+                Implication::ImplyCallReturnType(name, ty) => {
+                    todo!("Implement imply call return type for {name} {ty:?}")
+                }
+                Implication::NoImplication => todo!(),
+                Implication::ImplyFunctionReturnType(ty) => {
+                    if self.return_type == Type::Dynamic || ty == &self.return_type {
+                        println!("Setting return type of function {:?}", ty);
+                        self.return_type = ty.clone();
+                    } else {
+                        panic!("Return of function was already inferred before as a type different than {current_ty}, cannot switch types", current_ty = print_type(&self.return_type))
+                    }
+                }
+            }
+        }
+    }
+}
+
+impl Typer {
+    pub fn new() -> Typer {
+        return Typer {
+           // let_bindings_types: HashMap::new(),
+           functions: vec![]
+        };
+    }
+
+    pub fn type_expr(&mut self, expr: Expr) -> Expr {
+        //pretend the program has a main
+        let f = Function {
+            id: 0,
+            let_bindings: HashMap::new(),
+            current_scope_specific_bindings: vec![vec![]],
+            return_type: Type::Dynamic,
+            fully_qualified_name: "main".to_string(),
+            closure_implications: HashMap::new(),
+            closes_over: HashMap::new(),
+            parameters: vec![],
+        };
+        self.functions.push(f);
+        let (e, _) = self.type_internal(expr, 0);
+        e
+    }
+
+    fn type_internal(
+        &mut self,
+        expr: Expr,
+        function_id: usize
+    ) -> (Expr, Vec<Implication>) {
+        let function = self.functions.get_mut(function_id).unwrap();
+        match expr {
+            Expr::Let {
+                name, value, next, ..
+            } => {
+                let (value, imply) = self.type_internal(*value, function_id);
+                let value_type = value.get_type();
+
+                function.push_binding(&name, value_type.clone());
+
+                let (next, imply) = self.type_internal(*next, function_id);
+                return (
+                    Expr::Let {
+                        name,
+                        value: Box::new(value.clone()),
+                        let_type: value_type,
+                        next: Box::new(next),
+                    },
+                    vec![],
+                );
+            }
+            Expr::Var { name, .. } => {
+                let var_type = function.find_name(&name);
+                return (
+                    Expr::Var {
+                        name,
+                        ty: var_type.clone(),
+                    },
+                    vec![],
+                );
+            }
+            Expr::If {
+                cond,
+                then,
+                otherwise,
+                ..
+            } => {
+                let (cond, cond_imply) = self.type_internal(*cond.clone(), function_id);
+                let (then, then_imply) = self.type_internal(*then.clone(), function_id);
+                let (otherwise, other_imply) = self.type_internal(*otherwise.clone(), function_id);
+                let then_type = then.get_type();
+                let otherwise_type = then.get_type();
+                let if_type = if then_type == otherwise_type {
+                    then_type.into()
+                } else {
+                    Type::Either(then_type.into(), otherwise_type.into())
+                };
+                let mut all_implications = cond_imply;
+                all_implications.extend(then_imply);
+                all_implications.extend(other_imply);
+
+                return (
+                    Expr::If {
+                        cond: cond.into(),
+                        then: then.into(),
+                        otherwise: otherwise.into(),
+                        ty: if_type,
+                    },
+                    all_implications,
+                );
+            }
+            Expr::Int { value } => return (Expr::Int { value }, vec![]),
+            Expr::FuncDecl(fdecl) => {
+                let mut new_function = function.create_closure(&fdecl);
+                self.functions.push(new_function);
+                let new_function = self.functions.get_mut(new_function);
+                let return_ty = fdecl.body.get_type();
+                let function_type = Type::Function(ClosureType {
+                    params: new_function.parameters.clone(),
+                    ret: return_ty.clone().into(),
+                });
+                //this will return the implication that param x is int
+                let (body, mut imply) = self.type_internal(*fdecl.body, &new_function);
+
+                //let's add an implication for the body return type
+
+                imply.push(Implication::ImplyFunctionReturnType(
+                    body.get_type().clone(),
+                ));
+
+                new_function.process_implications(&mut imply);
+
+                function.push_binding(&fdecl.name, function_type);
+                return (
+                    Expr::FuncDecl(FuncDecl {
+                        name: fdecl.name,
+                        params: new_function.parameters.clone(),
+                        body: body.into(),
+                        return_ty: new_function.return_type,
+                    }),
+                    vec![],
+                );
+            }
+            Expr::FuncCall { name, args, ty } => {
+                let mut typed_args = vec![];
+                for arg in args {
+                    let (arg_typed, imply) = self.type_internal(arg, function);
+                    typed_args.push(arg_typed);
+                }
+                let function_type = function.find_name(&name);
+
+                return match function_type {
+                    Type::Function(ClosureType { ret, .. }) => (
+                        Expr::FuncCall {
+                            name,
+                            args: typed_args,
+                            ty: *ret.clone(),
+                        },
+                        vec![],
+                    ),
+                    _ => (
+                        Expr::FuncCall {
+                            name,
+                            args: typed_args,
+                            ty: Type::Dynamic,
+                        },
+                        vec![],
+                    ),
+                };
+            }
+            Expr::BinOp {
+                op,
+                left,
+                right,
+                ..
+            } => {
+                match op {
+                    BinaryOp::Mul
+                    | BinaryOp::Div
+                    | BinaryOp::Sub
+                    | BinaryOp::Rem
+                    | BinaryOp::Add => {
+                        //mul is always int * int
+                        //if either left or right is a variable, we have to imply this variable is int. Same for function calls
+
+                        let (lhs, mut imply_lhs) = self.infer_binexpr_side(left, function);
+                        function.process_implications(&mut imply_lhs);
+
+                        let (rhs, mut imply_rhs) = self.infer_binexpr_side(right, function);
+                        function.process_implications(&mut imply_rhs);
+                        (
+                            Expr::BinOp {
+                                op,
+                                left: lhs.into(),
+                                right: rhs.into(),
+                                ty: Type::Int,
+                            },
+                            vec![],
+                        )
+                    },
+                    BinaryOp::Lt => {
+                        let (lhs, mut imply_lhs) = self.infer_binexpr_side(left, function);
+                        function.process_implications(&mut imply_lhs);
+
+                        let (rhs, mut imply_rhs) = self.infer_binexpr_side(right, function);
+                        function.process_implications(&mut imply_rhs);
+                        (
+                            Expr::BinOp {
+                                op,
+                                left: lhs.into(),
+                                right: rhs.into(),
+                                ty: Type::Bool,
+                            },
+                            vec![],
+                        )
+                    },
+                    _ => todo!("Not implemented operator {op:?}"),
+                }
+            }
+            e => (todo!("Not implemented: {e:?}"), vec![]),
+        }
+    }
+
+    fn infer_binexpr_side(
+        &mut self,
+        side_expr: Box<Expr>,
+        function: &mut Function,
+    ) -> (Expr, Vec<Implication>) {
+        match &*side_expr {
+            Expr::Var { name, ty } => {
+                let mut implications = vec![];
+                if function.try_get_binding(name).is_some() {
+                    implications.push(Implication::ImplyLetType(name.clone(), Type::Int))
+                } else if function.try_get_parameter(name).is_some() {
+                    implications.push(Implication::ImplyParameterOfFunction(
+                        name.clone(),
+                        Type::Int,
+                    ))
+                } else if function.closes_over.contains_key(name) {
+                    implications.push(Implication::NoImplication); //TODO implication of closure arg
+                } else {
+                    todo!("No let bindings, function parameters or closure variable found: {name}");
+                }
+                (
+                    Expr::Var {
+                        name: name.clone(),
+                        ty: Type::Int,
+                    },
+                    implications,
+                )
+            }
+            Expr::Int { value } => (Expr::Int { value: *value }, vec![]),
+            Expr::FuncCall { name, args, ty } => {
+                let (fcall, imply) = self.type_internal(
+                    Expr::FuncCall {
+                        name: name.clone(),
+                        args: args.clone(),
+                        ty: ty.clone(),
+                    },
+                    function,
+                );
+                let Expr::FuncCall { name, args, ty } = fcall else {
+                    todo!("Inferred function but got something else")
+                };
+                match ty {
+                    //TODO return implications?
+                    Type::Int => (
+                        Expr::FuncCall {
+                            name,
+                            args,
+                            ty: Type::Int,
+                        },
+                        vec![],
+                    ),
+                    Type::Dynamic => (
+                        Expr::FuncCall {
+                            name: name.clone(),
+                            args,
+                            ty: Type::Int,
+                        },
+                        vec![Implication::ImplyCallReturnType(name, Type::Int)],
+                    ),
+                    _ => {
+                        todo!("Return type of function is not int, or is not dynamic (thus cannot be inferred)")
+                    }
+                }
+            }
+            
+            _ => todo!(),
+        }
+    }
+}
+
+#[cfg(test)]
+pub mod test {
+
+    #[cfg(test)]
+    use pretty_assertions::assert_eq;
+
+    use rinha::parser;
+
+    use super::Typer;
+
+    fn to_hir(term: rinha::ast::Term) -> rinha::hir::Expr {
+        return rinha::hir::ast_to_hir(term, None, 0);
+    }
+
+    fn compile(text: &str) -> rinha::hir::Expr {
+        let file = parser::parse_or_report("test_file", text).unwrap();
+        let mut typer = Typer::new();
+
+        return typer.type_expr(to_hir(file.expression));
+    }
+
+    #[test]
+    fn literal_is_int() {
+        let expr = compile("0");
+        let expr_type = expr.get_type();
+        assert_eq!(expr_type, rinha::hir::Type::Int);
+    }
+
+    #[test]
+    fn var_x_is_int() {
+        let expr = compile("let x=0;x");
+        match expr {
+            rinha::hir::Expr::Let {
+                name,
+                value,
+                next,
+                let_type,
+            } => {
+                assert_eq!(name, "x");
+                assert_eq!(value.get_type(), rinha::hir::Type::Int);
+                assert_eq!(next.get_type(), rinha::hir::Type::Int);
+                assert_eq!(let_type, rinha::hir::Type::Int);
+            }
+            _ => {
+                panic!("Expected a let expression");
+            }
+        }
+    }
+
+    #[test]
+    fn function_returns_int() {
+        let expr = compile(
+            "
+let x = fn() => {
+    1
+};
+x()
+",
+        );
+
+        let printed = super::print_expr(&expr);
+        println!("{}", printed);
+        let expected = "
+let x: fn() -> int = fn x() -> int {
+    1
+} [body type = int];
+x() [int]
+";
+        assert_eq!(printed, expected.trim());
+    }
+
+    #[test]
+    fn binop_mul_int_literal_is_int() {
+        let expr = compile("10 * 20");
+
+        let printed = super::print_expr(&expr);
+        println!("{}", printed);
+        let expected = "(10 [int] * 20 [int]) [int]";
+        assert_eq!(printed, expected.trim());
+    }
+
+    #[test]
+    fn infer_param_type() {
+        let expr = compile(
+            "
+let f = fn(x) => {
+    x + 1
+};
+f(2)
+",
+        );
+
+        let printed = super::print_expr(&expr);
+        println!("{}", printed);
+        let expected = "
+let f: fn(int) -> int = fn f(x: int) -> int {
+    (x [int] [int] + 1 [int]) [int]
+} [body type = int];
+f(2) [int]
+";
+        assert_eq!(printed, expected.trim());
+    }
+
+    #[test]
+    fn full_example() {
+        let expr = compile(
+            "
+let iter = fn (from, to, call, prev) => {
+  if (from < to) {
+    let res = call(from);
+    iter(from + 1, to, call, res)
+  } else {
+    prev
+  }
+};
+
+let work = fn(x) => {
+  let work_closure = fn(y) => {
+    let xx = x * y;
+    let tupl = (xx, x);
+    let f = first(tupl);
+    let s = second(tupl);
+    f * s
+  };
+
+  iter(0, 800, work_closure, 0)
+};
+
+let iteration = iter(0, 180, work, 0);
+
+0
+",
+        );
+
+        let printed = super::print_expr(&expr);
+        println!("{}", printed);
+        let expected = "
+let f: fn(int) -> int = fn f(x: int) -> int {
+    (x [int] [int] + 1 [int]) [int]
+} [body type = int];
+f(2) [int]
+";
+        assert_eq!(printed, expected.trim());
+    }
+
+    #[test]
+    fn fibonacci() {
+        let expr = compile(
+            "
+let fib = fn (n) => {
+  if (n < 2) {
+    n
+  } else {
+    fib(n - 1) + fib(n - 2)
+  }
+};
+fib(30)
+",
+        );
+
+        let printed = super::print_expr(&expr);
+        println!("{}", printed);
+        let expected = "
+let fib: fn(dyn) -> dyn = fn fib(n: dyn) -> dyn {
+  if (n [dyn] < 2 [dyn]) {
+    n [dyn]
+  } else {
+    fib(n [dyn] - 1 [dyn]) [dyn] + fib(n [dyn] - 2 [dyn]) [dyn] [dyn]
+  } [dyn]
+} [body type = dyn];
+fib(30) [dyn]
+";
+        assert_eq!(printed, expected.trim());
+    }
+}

@@ -22,7 +22,7 @@ impl<T: Element> Element for Box<T> {
     }
 }
 
-#[derive(Default, Hash, PartialEq, Eq, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Default, Debug, Hash, PartialEq, Eq, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Location {
     pub start: usize,
     pub end: usize,
@@ -37,12 +37,6 @@ impl Location {
             end,
             filename: filename.into(),
         }
-    }
-}
-
-impl Debug for Location {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "Location")
     }
 }
 
@@ -135,7 +129,7 @@ impl Element for Int {
     }
 }
 
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Eq, PartialEq, Clone, serde::Serialize)]
 pub enum BinaryOp {
     Add, // Add
     Sub, // Subtract

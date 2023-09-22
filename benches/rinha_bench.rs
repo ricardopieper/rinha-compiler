@@ -44,7 +44,7 @@ pub fn criterion_benchmark(c: &mut Criterion) {
 
     let mut group = c
       .benchmark_group("rinha-bench");
-    group.sample_size(15);
+    group.sample_size(30);
     group.bench_with_input(
         BenchmarkId::new("rinha-bench", "iterative"),
         &PERF_PROGRAM,
@@ -62,13 +62,13 @@ pub fn criterion_benchmark(c: &mut Criterion) {
 fn main(){
     
   // make Criterion listen to command line arguments
-  let c = Criterion::default().configure_from_args();
+  let mut c = Criterion::default().configure_from_args();
   let str_unix_time = std::time::SystemTime::now()
     .duration_since(std::time::UNIX_EPOCH)
     .unwrap()
     .as_secs()
     .to_string();
-  let mut c = c.save_baseline(str_unix_time);
+  //let mut c = c.save_baseline(str_unix_time);
 
   criterion_benchmark(&mut c);
 
