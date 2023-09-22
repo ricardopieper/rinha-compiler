@@ -4,6 +4,7 @@ use crate::{ast::{Binary, Bool, Call, First, Function, If, Let, Print, Second, T
 pub struct FuncDecl{
     pub params: Vec<String>,
     pub body: Box<Expr>, //the return type is the type of this body,
+    pub is_tco_trampoline: bool
 }
 
 #[derive(Debug, Clone)]
@@ -90,6 +91,7 @@ pub fn ast_to_hir(ast: Term) -> Expr {
             Expr::FuncDecl(FuncDecl {
                 params: args,
                 body: Box::new(ast),
+                is_tco_trampoline: false
             })
         }
         Term::Let(Let {

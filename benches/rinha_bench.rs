@@ -1,14 +1,15 @@
 use criterion::{BenchmarkId, Criterion};
 use rinha::{
     lambda_compiler::{CompilationResult, ExecutionContext, LambdaCompiler},
-    parser,
+    parser, hir::ast_to_hir,
 };
 
 fn compile(text: &str) -> CompilationResult {
     let file = parser::parse_or_report("bench_test", text).unwrap();
 
     let compiler = LambdaCompiler::new();
-    let program = compiler.compile(file.expression);
+    let hir = ast_to_hir(file.expression);
+    let program = compiler.compile(hir);
 
     return program;
 }

@@ -25,10 +25,10 @@ pub mod ast;
 /// Parser LALRPOP module. It does uses a parse generator to
 /// generate a parser and lexer for the language.
 pub mod parser;
+pub mod hir;
 
 pub mod lambda_compiler;
 
-pub mod hir;
 pub mod typing;
 
 /// Simple program to run `rinha` language.
@@ -91,7 +91,8 @@ fn program() -> miette::Result<()> {
     let start = std::time::Instant::now();
 
     let compiler = lambda_compiler::LambdaCompiler::new();
-    let program = compiler.compile(file.expression);
+    let hir = crate::hir::ast_to_hir(file.expression);
+    let program = compiler.compile(hir);
     let end = std::time::Instant::now();
 
     println!("Compile Time: {:?}", end - start);

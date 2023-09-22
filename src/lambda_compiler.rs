@@ -1,10 +1,10 @@
+
+
 use crate::{
-    ast::{
-        BinaryOp, Bool, Call, First, Function, If, Int, Let, Print, Second, Str, Term,
-        Tuple, Location,
-    },
-    parser::Var,
+    ast::BinaryOp
 };
+
+use crate::hir::{Expr, FuncDecl};
 
 pub type LambdaFunction = Box<dyn Fn(&mut ExecutionContext) -> Value>;
 
@@ -32,15 +32,18 @@ pub enum Value {
     IntBoolTuple(i32, bool),
     BoolTuple(bool, bool),
     DynamicTuple(Box<Value>, Box<Value>),
-    Closure(Closure), //unhinged
+    Closure(Closure),
+    Trampoline(Closure),
     Error(&'static str),
     //Unit,
     //None,
 }
 
+
 impl ToString for Value {
     fn to_string(&self) -> String {
         match self {
+            Value::Trampoline(_) => "trampoline".to_string(),
             Value::Int(i) => i.to_string(),
             Value::Str(s) => s.to_string(),
             Value::DynamicTuple(a, b) => format!("({}, {})", a.to_string(), b.to_string()),
@@ -63,10 +66,10 @@ pub struct StackFrame {
 
 pub struct Callable {
     pub parameters: &'static [usize],
-    pub body: Box<dyn Fn(&mut ExecutionContext) -> Value>,
-    pub location: Location,
+    pub body: LambdaFunction,
+    //pub location: Location,
     pub tco_optimized: bool,
-    pub is_tco_trampoline: bool
+    pub trampoline_of: Option<usize> //the callable index this callable belongs to
 }
 
 pub struct ExecutionContext<'a> {
@@ -79,7 +82,7 @@ pub struct ExecutionContext<'a> {
 }
 
 pub struct CompilationResult {
-    pub main: Box<dyn Fn(&mut ExecutionContext) -> Value>,
+    pub main: LambdaFunction,
     pub strings: Vec<&'static str>,
     pub functions: Vec<Callable>,
 }
@@ -136,7 +139,7 @@ impl<'a> ExecutionContext<'a> {
         evaluate_next: &LambdaFunction,
         var_index: usize,
     ) -> Value {
-        let bound_value = evaluate_value(self);
+        let bound_value = self.run_lambda_trampoline(evaluate_value);
         let call_stack_index = self.call_stack.len() - 1;
         let frame_bindings = &mut self.let_bindings[var_index];
         let var_in_stack = frame_bindings.get_mut(call_stack_index);
@@ -146,6 +149,7 @@ impl<'a> ExecutionContext<'a> {
             frame_bindings.push(bound_value);
             self.frame().let_bindings_pushed.push(var_index);
         }
+        //Does not run trampoline because it could be the last statement in the function, which would cause recursion
         let next = evaluate_next(self);
         return next;
     }
@@ -153,7 +157,7 @@ impl<'a> ExecutionContext<'a> {
     #[inline(always)]
     fn eval_var(&self, index: usize, varname: &'static str) -> Value {
         //@PERF no clone pls
-        println!("Trying to get var {index} {varname}");
+        //println!("Trying to get var {index} {varname}");
         let var_stack = self.let_bindings.get(index);
         match var_stack {
             Some(value) => value.last().unwrap().clone(), //will only be cloned and heap allocated on complex structures
@@ -168,7 +172,7 @@ impl<'a> ExecutionContext<'a> {
         evaluate_then: &LambdaFunction,
         evaluate_otherwise: &LambdaFunction,
     ) -> Value {
-        let condition_result = evaluate_condition(self);
+        let condition_result = self.run_lambda_trampoline(evaluate_condition);
         match condition_result {
             Value::Bool(true) => evaluate_then(self),
             Value::Bool(false) => evaluate_otherwise(self),
@@ -190,8 +194,8 @@ impl<'a> ExecutionContext<'a> {
     }
 
     fn binop_add(&mut self, evaluate_lhs: &LambdaFunction, evaluate_rhs: &LambdaFunction) -> Value {
-        let lhs = evaluate_lhs(self);
-        let rhs = evaluate_rhs(self);
+        let lhs = self.run_lambda_trampoline(&evaluate_lhs);
+        let rhs = self.run_lambda_trampoline(&evaluate_rhs);
         match (&lhs, &rhs) {
             (Value::Int(lhs), Value::Int(rhs)) => Value::Int(lhs + rhs),
             (Value::Int(lhs), Value::Bool(rhs)) => Value::Int(lhs + *rhs as i32),
@@ -213,48 +217,122 @@ impl<'a> ExecutionContext<'a> {
         called_name: &str,
     ) -> Value {
         let callee_function = evaluate_callee(self);
-        let tail_rec;
         let Value::Closure(Closure { callable_index }) = callee_function else {
             panic!("Call to non-function value {called_name}")
         };
         {
             let callable = &self.functions[callable_index];
-            tail_rec = callable.tco_optimized;
+    
             if callable.parameters.len() != arguments.len() {
                 panic!("Wrong number of arguments for function {called_name}")
             }
-            println!("Calling {called_name} at location {}:{} {}", callable.location.start, callable.location.end, callable.location.filename);
+           // println!("Calling {called_name}");
 
         }
         self.make_new_frame(function_name_index, callable_index, arguments);
         //Erase the lifetime of the function pointer. This is a hack, forgive me for I have sinned.
         //Let it wreck havoc on the interpreter state if it wants.
-        let function: &Box<dyn Fn(&mut ExecutionContext) -> Value> =
+        let function: &LambdaFunction =
             unsafe { std::mem::transmute(&self.functions[callable_index].body) };
         let function_result = function(self);
+        //println!("Eval result: {function_result:?} caller: {}", self.frame().function);
         
-        //IF this is tail recursive, the values in the stack frame must be still alive so that
-        //when the trampoline calls, it can load the variables remaining at this stage
-        println!("LAMBDA: Finished running {called_name}");
-        if !tail_rec {
-            println!("LAMBDA: Popping frame");
-
-            let mut popped_frame = self.pop_frame();
-           
-            for let_binding in popped_frame.let_bindings_pushed.iter() {
-                self.let_bindings[*let_binding].pop();
+        if let Value::Trampoline(Closure { callable_index }) = function_result {
+            //analyze the resulting trampoline, see if we should execute it or pass along
+            let callee = &self.functions[callable_index];
+            if let Some(_) = callee.trampoline_of {
+                return Value::Trampoline(Closure {callable_index})    
+            } else {
+                println!("Value returned is a function but is not a TCO trampoline");
+                self.pop_frame_and_bindings();
+                return function_result;
             }
-        
-            popped_frame.let_bindings_pushed.clear();
-            self.reusable_frames.push(popped_frame);
+
         } else {
-            println!("LAMBDA: Frame not popped due to tail rec")
+            self.pop_frame_and_bindings(); 
+            return function_result;
         }
-        return function_result;
+
+
+    }
+
+
+    pub fn run_trampoline(&mut self, maybe_trampoline: Value) -> Value {
+        let mut current @ Value::Trampoline(_) = maybe_trampoline else {
+            return maybe_trampoline;
+        };
+
+        //the top of the stack here is the stack of the call on the first iteration
+        //which needs to be destroyed after the while loop
+        let num_stack_frames_before = self.call_stack.len(); 
+
+        while let Value::Trampoline(Closure { callable_index }) = current {
+            //println!("state {:#?}", ec.let_bindings);
+            let callee = &self.functions[callable_index];
+            //println!("Eval result: {function_result:?} caller: {}", self.frame().function);
+            
+            /*
+            In order for the trampoline mechanism to work, we must ensure we're not calling
+            the trampoline inside the execution of the trampolined function. This would be the same as
+            just calling the function as is. We must end this stack frame (this lambda function)
+            by returning the closure value.
+
+            The trampoline function belongs to a recursive function, therefore we can check if the trampoline returned
+            belongs to this executing function. Counter intuitively, if that's the case, we *skip* the execution and just return it,
+            so that the original caller of the recursive function (that is not itself) can perform the trampoline.
+            */
+
+            let function: &LambdaFunction = unsafe { std::mem::transmute(&callee.body) };
+
+            //in theory we are in the same function, so just pass the current function along
+            //self.make_trampoline_frame(callable_index);
+            //We don't need to setup a new stack frame because when we call this function, 
+            //eval_call will run (because it's a *tail call optimization*), which will setup its own call stack.
+            //however, we count how many stacks 
+            current = function(self);
+
+            //self.pop_frame_and_bindings();
+        }
+
+        let num_stack_frames_after = self.call_stack.len();
+
+        let num_created_stack_frames = num_stack_frames_after - num_stack_frames_before;
+        let num_frames_to_pop = num_created_stack_frames + 1; //includes the very first one
+
+        for _ in 0 .. num_frames_to_pop {
+            self.pop_frame_and_bindings();
+        }
+
+        return current;
         
     }
 
 
+    pub fn run_lambda_trampoline(&mut self, lambda: &LambdaFunction) -> Value {
+        let maybe_trampoline = lambda(self);
+        return self.run_trampoline(maybe_trampoline);
+    }
+
+    fn pop_frame_and_bindings(&mut self) {
+        let mut popped_frame = self.pop_frame();
+        for let_binding in popped_frame.let_bindings_pushed.iter() {
+            self.let_bindings[*let_binding].pop();
+        }
+        popped_frame.let_bindings_pushed.clear();
+        self.reusable_frames.push(popped_frame);
+    }
+
+    //This frame returned a trampoline, but the values in the stack
+    //are still alive. In order for the trampoline to execute,
+    //the execution must end and backtrack to the original caller, which will run
+    //the trampoline. However, the values in the stack must still be there, so that 
+    //the trampoline can load the function args. However, if we don't do anything, 
+    //the trampoline won't execute because of the anti-recursion mechanism that is 
+    //based on the current function index, and whose function the trampoline belongs to.
+
+    //Therefore instead of popping the frame, we actually create a new frame with the 
+    //trampoline function id. This retains the stack frame, emulates recursion, and 
+    //changes the current function ID so that the trampoline is allowed to run.
     fn make_trampoline_frame(&mut self, callable_index: usize) {
         let new_frame = match self.reusable_frames.pop() {
             Some(mut new_frame) => {
@@ -274,7 +352,7 @@ impl<'a> ExecutionContext<'a> {
         self.push_frame(new_frame);
     }
 
-    fn make_new_frame(&mut self, function_name_index: usize, callable_index: usize, arguments: &Vec<Box<dyn Fn(&mut ExecutionContext<'_>) -> Value>>) {
+    fn make_new_frame(&mut self, function_name_index: usize, callable_index: usize, arguments: &[LambdaFunction]) {
         let mut new_frame = match self.reusable_frames.pop() {
             Some(mut new_frame) => {
                 self.stats.reused_frames += 1;
@@ -330,6 +408,7 @@ pub struct LambdaCompiler {
     pub all_functions: Vec<Callable>,
     pub var_names: Vec<&'static str>,
     pub strict_equals: bool,
+    pub closure_stack: Vec<usize>
 }
 
 #[derive(Eq, PartialEq, PartialOrd, Ord, Debug)]
@@ -350,6 +429,7 @@ impl LambdaCompiler {
             all_functions: vec![],
             strict_equals: true,
             var_names: vec![],
+            closure_stack: vec![usize::MAX]
         }
     }
 
@@ -389,9 +469,9 @@ impl LambdaCompiler {
 
     //whenever a function is constructed, it captures the environment. This is a closure.
 
-    fn compile_internal(&mut self, ast: Term) -> Box<dyn Fn(&mut ExecutionContext) -> Value> {
-        return match ast {
-            Term::Print(Print { value, .. }) => {
+    fn compile_internal(&mut self, ast: Expr) -> LambdaFunction {
+        let lambda: LambdaFunction = match ast {
+            Expr::Print{ value } => {
                 let evaluate_printed_value = self.compile_internal(*value);
                 //because the type of the expression is only known at runtime, we have to check it in the print function during runtime :(
                 Box::new(move |ec: &mut ExecutionContext| {
@@ -401,29 +481,28 @@ impl LambdaCompiler {
                     return value_to_print
                 })
             }
-            Term::Int(Int { value, .. }) => Box::new(move |ec| ec.eval_int(value)),
-            Term::Var(Var { text, .. }) => {
-                let varname_leaked: &'static str = text.leak();
+            Expr::Int{value } => Box::new(move |ec| ec.eval_int(value)),
+            Expr::Var{ name, .. } => {
+                let varname_leaked: &'static str = name.leak();
                 let index = self.intern_string(varname_leaked);
 
                 Box::new(move |ec: &mut ExecutionContext| ec.eval_var(index, varname_leaked))
             }
            
-            Term::Let(Let {
-                name: Var { text: var_name, .. },
+            Expr::Let{
+                name,
                 value,
-                next,
-                ..
-            }) => {
+                next
+            } => {
 
-                if let Term::Function(Function { parameters, value, location }) = &*value && var_name != "_" && self.is_tail_recursive(&value, &var_name) {
+                if let Expr::FuncDecl(FuncDecl { params, body, ..  }) = &*value && name != "_" && self.is_tail_recursive(&body, &name) {
                     //the recursive call becomes a closure
-                    let trampolined_function = self.into_tco(&value, &var_name);
+                    let trampolined_function = self.into_tco(&body, &name);
 
                     //println!("Function got TCO'd {trampolined_function:#?}");
-                    let evaluate_value = self.compile_function(trampolined_function, parameters, true, location.clone());
+                    let evaluate_value = self.compile_function(trampolined_function, params, true, None);
                     let evaluate_next = self.compile_internal(*next);
-                    let var_name_leaked: &'static str = var_name.leak();
+                    let var_name_leaked: &'static str = name.leak();
                     let var_index = self.intern_string(var_name_leaked);
                     Box::new(move |ec: &mut ExecutionContext| {
                         //println!("Evaluating Let {var_name_leaked} TCO");
@@ -434,99 +513,72 @@ impl LambdaCompiler {
                 else {
                     let evaluate_value = self.compile_internal(*value);
                     let evaluate_next = self.compile_internal(*next);
-                    if var_name == "_" {
+                    if name == "_" {
                         Box::new(move |ec: &mut ExecutionContext| {
                             evaluate_value(ec);
                             let next = evaluate_next(ec);
                             return next;
                         })
                     } else {
-                        let var_name_leaked: &'static str = var_name.leak();
+                        let var_name_leaked: &'static str = name.leak();
                         let var_index = self.intern_string(var_name_leaked);
                         Box::new(move |ec: &mut ExecutionContext| {
                             //println!("Evaluating Let {var_name_leaked} non-tco");
-
+                            //continuation into recursive call in next
                             ec.eval_let(&evaluate_value, &evaluate_next, var_index)
                         })
                     }
                 }
             }
            
-            Term::Error(e) => panic!("{}: {}", e.message, e.full_text),
-            Term::Binary(Binary { lhs, op, rhs, .. }) => self.compile_binexp(lhs, rhs, op),
-            Term::Str(Str { value, .. }) => {
+           // Expr::Error(e) => panic!("{}: {}", e.message, e.full_text),
+            Expr::BinOp { op, left, right } => self.compile_binexp(left, right, op),
+            Expr::String{value} => {
                 let leaked: &'static str = value.leak();
                 Box::new(move |_| Value::Str(leaked))
             }
-            Term::Call(Call {
-                callee, arguments, location
-            }) => match &*callee {
-                Term::Var(v) => {
-                    let called_name: &'static str = v.text.clone().leak();
+            Expr::FuncCall {
+                func, args
+            } => match &*func {
+                Expr::Var {name} => {
+                    let called_name: &'static str = name.clone().leak();
                     let function_name_index = self.intern_string(called_name);
-                    let evaluate_callee = self.compile_internal(*callee);
-                    let arguments = arguments
+                    let evaluate_callee = self.compile_internal(*func);
+                    let arguments = args
                         .into_iter()
                         .map(|arg| self.compile_internal(arg))
                         .collect::<Vec<_>>();
-                    let eval = Box::new(move |ec: &mut ExecutionContext| {
-                        println!("Calling location {:?} {called_name} {}", location, ec.frame().function);
-                        ec.eval_call(
+                    Box::new(move |ec: &mut ExecutionContext| {
+                        //println!("Calling {called_name} {}", ec.frame().function);
+                        let result = ec.eval_call(
                             &evaluate_callee,
                             &arguments,
                             function_name_index,
                             called_name,
-                        )
-                    });
-
-                    let tco = true;
-                    if tco {
-                        Box::new(move |ec: &mut ExecutionContext| {
-                            let mut eval_result = eval(ec); //<< this is the above eval_call
-                            println!("Eval result: {eval_result:?} caller: {}", ec.frame().function);
-                            let current_function = ec.frame().function;
-
-                            while let Value::Closure(Closure { callable_index }) = eval_result {
-                                println!("state {:#?}", ec.let_bindings);
-                                
-                                if current_function == callable_index { break; }
-                                println!("Got tail rec, calling {callable_index}");
-                                //becauase the previous call did not pop the frame, the variables should still be alive. Add a new stack frame
-                                ec.make_trampoline_frame(callable_index);
-                
-                                let function: &Box<dyn Fn(&mut ExecutionContext) -> Value> = unsafe { std::mem::transmute(&ec.functions[callable_index].body) };
-                
-                                eval_result = function(ec);
-                                println!("Executed!");
-                
-                                let mut popped_frame = ec.pop_frame();
-                                for let_binding in popped_frame.let_bindings_pushed.iter() {
-                                    ec.let_bindings[*let_binding].pop();
-                                }
-                                popped_frame.let_bindings_pushed.clear();
-                                ec.reusable_frames.push(popped_frame); 
-                            
-                            }
-                            eval_result
-                        })
-                    } else {
-                        eval
-                    }
+                        );
+                        //println!("Called {called_name} result = {result:?}");
+                        result
+                    })
                 }
                 _ => panic!("Cannot call non-var term"),
             },
-            Term::Function(Function {
-                parameters, value, location
+            Expr::FuncDecl(FuncDecl {
+                params, body, is_tco_trampoline,
             }) => {
-                self.compile_function(*value, &parameters, false, location)
+                let trampoline = if is_tco_trampoline {
+                    Some(self.closure_stack.last().copied().unwrap())
+                } else {
+                    None
+                };
+                self.compile_function(*body, &params, false, trampoline)
             }
-            Term::If(If {
-                condition,
+            Expr::If {
+                cond,
                 then,
                 otherwise,
                 ..
-            }) => {
-                let evaluate_condition = self.compile_internal(*condition);
+            } => {
+                let evaluate_condition = self.compile_internal(*cond);
                 let evaluate_then = self.compile_internal(*then);
                 let evaluate_otherwise = self.compile_internal(*otherwise);
                 Box::new(move |ec: &mut ExecutionContext| {
@@ -534,7 +586,7 @@ impl LambdaCompiler {
                 })
             }
             //only works on tuples
-            Term::First(First { value, .. }) => {
+            Expr::First{ value, .. } => {
                 let evaluate_value = self.compile_internal(*value);
                 Box::new(move |ec: &mut ExecutionContext| {
                     let value = evaluate_value(ec);
@@ -548,7 +600,7 @@ impl LambdaCompiler {
                     }
                 })
             }
-            Term::Second(Second { value, .. }) => {
+            Expr::Second{ value, .. } => {
                 let evaluate_value = self.compile_internal(*value);
                 Box::new(move |ec: &mut ExecutionContext| {
                     let value = evaluate_value(ec);
@@ -562,8 +614,8 @@ impl LambdaCompiler {
                     }
                 })
             }
-            Term::Bool(Bool { value, .. }) => Box::new(move |_| Value::Bool(value)),
-            Term::Tuple(Tuple { first, second, .. }) => {
+            Expr::Bool { value, .. } => Box::new(move |_| Value::Bool(value)),
+            Expr::Tuple { first, second, .. } => {
                 let evaluate_first = self.compile_internal(*first);
                 let evaluate_second = self.compile_internal(*second);
                 Box::new(move |ec: &mut ExecutionContext| {
@@ -571,90 +623,121 @@ impl LambdaCompiler {
                 })
             }
         };
+
+        return lambda;
+        /*if do_trampolining {
+            Box::new(move |ec| {
+                let result = lambda(ec);
+                let trampoline_result = ec.run_trampoline(result);
+                return trampoline_result;
+            })
+        } else {
+            lambda
+        }*/
+
     }
 
-    fn compile_function(&mut self, value: Term, parameters: &[Var], tco: bool, location: Location) -> LambdaFunction {
+    fn compile_function(&mut self, value: Expr, parameters: &[String], tco: bool, trampoline_of: Option<usize>) -> LambdaFunction {
         //Functions are compiled and stored into a big vector of functions, each one has a unique ID.
         //value will be the call itself, we're compiling the body of the tco trampoline
         //println!("Compile function: {value:#?} location: {location:?}");
+        let index_of_new_function = self.all_functions.len();
+        let callable = Callable {
+            body: Box::new(|_| panic!("Empty body, function not compiled")),
+            parameters: &[],
+            tco_optimized: false,
+            trampoline_of: None
+            //location
+        };
+        self.all_functions.push(callable);
+        self.closure_stack.push(index_of_new_function);
 
         //this will return the lambda for the call to iter
         let new_function = self.compile_internal(value);
 
         let parameters = parameters
             .into_iter()
-            .map(|param| param.text.clone())
+            .map(|param| param.clone())
             .collect::<Vec<_>>();
         let mut param_indices = vec![];
         for param in parameters {
             let interned = self.intern_string(param.leak());
             param_indices.push(interned);
         }
-        let loc = location.filename.clone().leak();
-
-        let callable = Callable {
+        let callable = self.all_functions.get_mut(index_of_new_function).unwrap();
+        *callable = Callable {
             body: new_function,
             parameters: param_indices.leak(),
             tco_optimized: tco,
-            location
+            trampoline_of,
+            //location
         };
-        let index_of_new_function = self.all_functions.len();
-
-        self.all_functions.push(callable);
-        Box::new(move |ec: &mut ExecutionContext| {
-            //println!("Evaluating function at location {}", loc);
-            ec.eval_closure(index_of_new_function)
-        })
+        self.closure_stack.pop();
+        if trampoline_of.is_none() {
+            Box::new(move |ec: &mut ExecutionContext| {
+                //println!("Evaluating function at location {}", loc);
+                ec.eval_closure(index_of_new_function)
+            })
+        } else {
+            Box::new(move |_| {
+                //println!("Evaluating function at location {}", loc);
+                Value::Trampoline(Closure { callable_index: index_of_new_function })
+            })
+        }
     }
 
     //only call when is_tail_recursive is true
-    fn into_tco(&mut self, value: &Term, fname: &str) -> Term {
+    fn into_tco(&mut self, value: &Expr, fname: &str) -> Expr {
         match value {
-            Term::Let(Let { name, value, next, location }) => {
-                Term::Let(Let { name: name.clone(), value: value.clone(), next: self.into_tco(next, fname).into(), location: location.clone() })
+            Expr::Let{ name, value, next } => {
+                Expr::Let { name: name.clone(), value: value.clone(), next: self.into_tco(next, fname).into() }
             }
-            Term::If(If { condition, then, otherwise, location }) => {
-                Term::If(If { condition: condition.clone(), then: self.into_tco(then, fname).into(), otherwise: self.into_tco(&otherwise, fname).into(), location: location.clone() })
+            Expr::If { cond, then, otherwise } => {
+                Expr::If { cond: cond.clone(), then: self.into_tco(then, fname).into(), otherwise: self.into_tco(&otherwise, fname).into() }
             },
-            Term::Call(call @ Call { callee, arguments, location, .. }) => {
-                match &**callee {
-                    Term::Var(Var { text, .. }) if text == fname => { 
-                        Term::Function(Function { 
-                            parameters: vec![],
-                            value: Term::Call(call.clone()).into(), 
-                            location: Location { start: location.start, end: location.end, filename: "TCO trampoline".into() }
+            call @ Expr::FuncCall { func, .. } => {
+                match &**func {
+                    Expr::Var{ name, .. } if name == fname => { 
+                        Expr::FuncDecl(FuncDecl {
+                            params: vec![],
+                            body: call.clone().into(), 
+                            is_tco_trampoline: true
                         }) // fn() => iter(from+1, ...)
                     },
-                    _ =>Term::Call( call.clone())
+                    _ =>call.clone()
                 }
             }
             t => t.clone() 
         }
     }
 
-    pub fn is_tail_recursive(&mut self, value: &Term, fname: &str) -> bool {
+    pub fn is_tail_recursive(&mut self, value: &Expr, fname: &str) -> bool {
+        //println!("Checking if is tail recursive: {fname} \n${value:#?}");
         match value {
-            Term::Call(Call { callee, .. }) => {
-                match &**callee {
-                    Term::Var(Var { text, .. }) => text == fname,
+            Expr::FuncCall { func, .. } => {
+                match &**func {
+                    Expr::Var{ name, .. } if name == fname => true,
                     _ => false
                 }
             }
-            Term::Let(Let { next, .. }) => {
+            Expr::Let{ next, .. } => {
                 self.is_tail_recursive(next, fname)
             }
-            Term::If(If { then, otherwise, .. }) => {
+            Expr::If { then, otherwise, .. } => {
                 self.is_tail_recursive(then, fname) || self.is_tail_recursive(otherwise, fname)
             }
             _ => false
         }
     }
 
-    pub fn compile(mut self, ast: Term) -> CompilationResult {
+    pub fn compile(mut self, ast: Expr) -> CompilationResult {
         let main = self.compile_internal(ast);
-
+        //trampolinize the returned value
+        let trampolinized = Box::new(move |ec: &mut ExecutionContext| {
+            ec.run_lambda_trampoline(&main)
+        });
         CompilationResult {
-            main,
+            main: trampolinized,
             strings: self.var_names,
             functions: self.all_functions,
         }
@@ -662,18 +745,18 @@ impl LambdaCompiler {
 
     fn compile_binexp(
         &mut self,
-        lhs: Box<Term>,
-        rhs: Box<Term>,
+        lhs: Box<Expr>,
+        rhs: Box<Expr>,
         op: BinaryOp,
-    ) -> Box<dyn Fn(&mut ExecutionContext) -> Value> {
+    ) -> LambdaFunction {
         let evaluate_lhs = self.compile_internal(*lhs);
         let evaluate_rhs = self.compile_internal(*rhs);
 
         macro_rules! int_binary_numeric_op {
             ($op:tt) => {
                 Box::new(move |ec: &mut ExecutionContext| {
-                    let lhs = evaluate_lhs(ec);
-                    let rhs = evaluate_rhs(ec);
+                    let lhs = ec.run_lambda_trampoline(&evaluate_lhs);
+                    let rhs = ec.run_lambda_trampoline(&evaluate_rhs);
                     match (&lhs, &rhs) {
                         (Value::Int(lhs), Value::Int(rhs)) => {
                             Value::Int(lhs $op rhs)
@@ -689,8 +772,8 @@ impl LambdaCompiler {
 
                 if (self.strict_equals) {
                     Box::new(move |ec: &mut ExecutionContext| {
-                        let lhs = evaluate_lhs(ec);
-                        let rhs = evaluate_rhs(ec);
+                        let lhs = ec.run_lambda_trampoline(&evaluate_lhs);
+                        let rhs = ec.run_lambda_trampoline(&evaluate_rhs);
 
                         match (&lhs, &rhs) {
                             (Value::Int(lhs), Value::Int(rhs)) => {
@@ -707,8 +790,8 @@ impl LambdaCompiler {
                     })
                 } else {
                     Box::new(move |ec: &mut ExecutionContext| {
-                        let lhs = evaluate_lhs(ec);
-                        let rhs = evaluate_rhs(ec);
+                        let lhs = ec.run_lambda_trampoline(&evaluate_lhs);
+                        let rhs = ec.run_lambda_trampoline(&evaluate_rhs);
 
                         return Value::Bool(lhs $op rhs);
                     })
@@ -733,17 +816,16 @@ impl LambdaCompiler {
             BinaryOp::Lte => binary_comparison_op!(<=),
             BinaryOp::Gte => binary_comparison_op!(>=),
             BinaryOp::And => Box::new(move |ec: &mut ExecutionContext| {
-                let lhs = evaluate_lhs(ec);
-                let rhs = evaluate_rhs(ec);
-
+                let lhs = ec.run_lambda_trampoline(&evaluate_lhs);
+                let rhs = ec.run_lambda_trampoline(&evaluate_rhs);
                 match (&lhs, &rhs) {
                     (Value::Bool(lhs), Value::Bool(rhs)) => Value::Bool(*lhs && *rhs),
                     _ => panic!("Type error: Cannot apply binary operator && (and) on these values: {lhs:?} and {rhs:?}"),
                 }
             }),
             BinaryOp::Or => Box::new(move |ec: &mut ExecutionContext| {
-                let lhs = evaluate_lhs(ec);
-                let rhs = evaluate_rhs(ec);
+                let lhs = ec.run_lambda_trampoline(&evaluate_lhs);
+                let rhs = ec.run_lambda_trampoline(&evaluate_rhs);
                 match (&lhs, &rhs) {
                     (Value::Bool(lhs), Value::Bool(rhs)) => Value::Bool(*lhs || *rhs),
                     _ => panic!("Type error: Cannot apply binary operator || (or) on these values: {lhs:?} and {rhs:?}"),

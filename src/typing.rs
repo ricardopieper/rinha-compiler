@@ -4,7 +4,7 @@ use std::{
     env::Args,
 };
 
-use rinha::{
+use crate::{
     ast::BinaryOp,
     hir::{Expr, FuncDecl},
 };
@@ -432,7 +432,7 @@ impl Typer {
                     None => Ok((Substitutions::new(), instantiation, Defer::NoDefer))
                 }
             }
-            Expr::FuncDecl(FuncDecl { params, body }) => {
+            Expr::FuncDecl(FuncDecl { params, body, .. }) => {
                 //ABS in algorithm w
                 //create a new type for this parameter (it seems the video doesn't handle multiple vars, as the body would be another lambda expr)
                 //maybe we can extend W to support multiple params later
@@ -632,7 +632,7 @@ impl Typer {
 
                 let mut new_type_env = type_env.clone();
 
-                if let Expr::FuncDecl(FuncDecl { params, body }) = &**value {
+                if let Expr::FuncDecl(FuncDecl { params, body, .. }) = &**value {
                     //we will need to 
                     let mut args: Vec<_> = params
                         .iter()
@@ -845,22 +845,22 @@ impl Typer {
 pub mod tests {
     use std::{cell::Cell, collections::BTreeMap};
 
-    use crate::typing::{
+    use crate::{typing::{
         Context, MonoType, PolyType, Substitutions, TypeFunction, TypeSubstitutable, TypeVariable,
-    };
+    }, ast::Term};
 
     #[cfg(test)]
     use pretty_assertions::assert_eq;
-    use rinha::parser;
+
 
     use super::{Defer, Typer, UnificationError};
 
-    fn to_hir(term: rinha::ast::Term) -> rinha::hir::Expr {
-        return rinha::hir::ast_to_hir(term);
+    fn to_hir(term: Term) -> crate::hir::Expr {
+        return crate::hir::ast_to_hir(term);
     }
 
     fn run_w(text: &str) -> Result<(Substitutions, MonoType, Defer), UnificationError> {
-        let file = parser::parse_or_report("test_file", text).unwrap();
+        let file = crate::parser::parse_or_report("test_file", text).unwrap();
         let hir = to_hir(file.expression);
         let mut typer = Typer::new();
         let ctx = Context {

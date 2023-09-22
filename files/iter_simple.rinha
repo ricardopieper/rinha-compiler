@@ -1,0 +1,12 @@
+let iter = fn (from, to, call, prev) => {
+  if (from < to) {
+    let res = call(from);
+    iter(from + 1, to, call, res)
+  } else {
+    prev
+  }
+};
+
+let iteration = iter(0, 10000, fn(x) => {print(x)}, 0);
+
+print(iteration)
