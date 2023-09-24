@@ -1,5 +1,5 @@
 [package]
-name = "rinha"
+name = "lambda_rinha"
 version = "0.0.1"
 edition = "2021"
 description = "Competição saudável de compiladores"

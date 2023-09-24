@@ -13,7 +13,7 @@ COPY Cargo-docker.toml ./Cargo.toml
 RUN cargo build --release
 
 FROM alpine:latest
-WORKDIR /app
-COPY --from=builder /usr/src/app/target/release/rinha /app/rinha
-run ls /app
-ENTRYPOINT ["/app/rinha"]
+RUN mkdir /var/rinha
+WORKDIR /var/rinha
+COPY --from=builder /usr/src/app/target/release/lambda_rinha /var/rinha/lambda_rinha
+ENTRYPOINT ["/var/rinha/lambda_rinha"]
