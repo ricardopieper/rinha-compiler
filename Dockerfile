@@ -16,4 +16,4 @@ FROM alpine:latest
 RUN mkdir /var/rinha
 WORKDIR /var/rinha
 COPY --from=builder /usr/src/app/target/release/lambda_rinha /var/rinha/lambda_rinha
-ENTRYPOINT ["/var/rinha/lambda_rinha"]
+CMD ["/var/rinha/lambda_rinha", "/var/rinha/source.rinha.json"]
