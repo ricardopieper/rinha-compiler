@@ -16,8 +16,8 @@ pub struct Stats {
 
 #[derive(Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
 pub struct Closure {
-    pub callable_index: u32,
-    pub closure_env_index: u32
+    pub callable_index: usize,
+    pub closure_env_index: usize
     //pub environment: BTreeMap<usize, Value>
 }
 #[derive(Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
@@ -26,23 +26,23 @@ pub struct HeapPointer(u32);
 #[derive(Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
 pub struct StringPointer(u32);
 
+
+#[derive(Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
+pub struct ClosurePointer(u32);
+
+
+#[derive(Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
+pub struct TuplePointer(u32);
+
 /// Enum for runtime values
 #[derive(Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
 pub enum Value {
-    /// Ints
     Int(i32),
     Bool(bool),
     Str(StringPointer),
-    IntTuple(i32, i32),
-    BoolIntTuple(bool, i32),
-    IntBoolTuple(i32, bool),
-    BoolTuple(bool, bool),
-    DynamicTuple(HeapPointer, HeapPointer),
-    Closure(Closure),
-    Trampoline(Closure),
-    //Error(u32),
-    //Unit,
-    //None,
+    Tuple(TuplePointer),
+    Closure(ClosurePointer),
+    Trampoline(ClosurePointer),
 }
 
 
@@ -55,15 +55,16 @@ impl Value {
                 ec.string_values[*s as usize].to_string()
             }
             //@TODO read from box storage
-            Value::DynamicTuple(HeapPointer(a), HeapPointer(b)) => {
-                let a = &ec.heap[*a as usize];
-                let b = &ec.heap[*b as usize];
+            Value::Tuple(TuplePointer(t)) => {
+                let (f, s) = &ec.tuples[*t as usize];
+                let a = &ec.heap[f.0 as usize];
+                let b = &ec.heap[s.0 as usize];
                 format!("({}, {})", a.to_string(ec), b.to_string(ec))
             }
-            Value::IntTuple(a, b) => format!("({}, {})", a.to_string(), b.to_string()),
+          /*   Value::IntTuple(a, b) => format!("({}, {})", a.to_string(), b.to_string()),
             Value::BoolTuple(a, b) => format!("({}, {})", a.to_string(), b.to_string()),
             Value::IntBoolTuple(a, b) => format!("({}, {})", a.to_string(), b.to_string()),
-            Value::BoolIntTuple(a, b) => format!("({}, {})", a.to_string(), b.to_string()),
+            Value::BoolIntTuple(a, b) => format!("({}, {})", a.to_string(), b.to_string()),*/
             Value::Closure(..) => "function".to_string(),
             //Value::Error(e) => format!("error: {}", e),
            // Value::Unit => "unit".to_string(),
@@ -101,7 +102,9 @@ pub struct ExecutionContext<'a> {
     //most things are done in the "stack" for some definition of stack which is very loose here....
     //this heap is for things like dynamic tuples that could very well be infinite.
     //This makes the Value enum smaller than storing boxes directly
-    pub heap: Vec<Value>
+    pub heap: Vec<Value>,
+    pub tuples: Vec<(HeapPointer, HeapPointer)>,
+    pub closures: Vec<Closure>
    
 }
 
@@ -127,6 +130,8 @@ impl<'a> ExecutionContext<'a> {
             closure_environments: vec![],
             heap: vec![],
             string_values: vec![],
+            tuples: vec![],
+            closures: vec![]
             
         }
     }
@@ -148,13 +153,16 @@ impl<'a> ExecutionContext<'a> {
         self.call_stack.push(frame);
     }
 
-    fn eval_closure_no_env(&self, index_of_new_function: u32) -> Closure {
-        Closure {
-            callable_index: index_of_new_function as u32, closure_env_index: u32::MAX,
-        }
+    fn eval_closure_no_env(&mut self, index_of_new_function: usize) -> ClosurePointer {
+        let closure =  Closure {
+            callable_index: index_of_new_function, closure_env_index: usize::MAX,
+        };
+        let closure_p = self.closures.len();
+        self.closures.push(closure);
+        return ClosurePointer(closure_p as u32);
     }
 
-    fn eval_closure_with_env(&mut self, index_of_new_function: usize) -> Closure {
+    fn eval_closure_with_env(&mut self, index_of_new_function: usize) -> ClosurePointer {
 
         let function = self.functions.get(index_of_new_function).unwrap();
         let closure = function.closure_indices;
@@ -172,9 +180,13 @@ impl<'a> ExecutionContext<'a> {
         let current_id = self.closure_environments.len();
         self.closure_environments.push(environment);
  
-        Closure {
-            callable_index: index_of_new_function as u32, closure_env_index: current_id as u32
-        }
+        let closure = Closure {
+            callable_index: index_of_new_function, closure_env_index: current_id
+        };
+        let closure_p = self.closures.len();
+        self.closures.push(closure);
+        return ClosurePointer(closure_p as u32);
+
     }
 
     fn eval_int(&self, value: i32) -> Value {
@@ -320,9 +332,10 @@ impl<'a> ExecutionContext<'a> {
         called_name: &str,
     ) -> Value {
         let callee_function = evaluate_callee(self);
-        let Value::Closure(Closure { callable_index, closure_env_index }) = callee_function else {
+        let Value::Closure(ClosurePointer(p)) = callee_function else {
             panic!("Call to non-function value {called_name}")
         };
+        let Closure { callable_index, closure_env_index } = self.closures[p as usize];
         {
             let callable = &self.functions[callable_index as usize];
     
@@ -332,7 +345,7 @@ impl<'a> ExecutionContext<'a> {
            // println!("Calling {called_name}");
 
         }
-        self.make_new_frame(function_name_index, callable_index, closure_env_index, arguments);
+        self.make_new_frame(function_name_index, callable_index, closure_env_index, ClosurePointer(p), arguments);
         //Erase the lifetime of the function pointer. This is a hack, forgive me for I have sinned.
         //Let it wreck havoc on the interpreter state if it wants.
         let function: &LambdaFunction =
@@ -340,9 +353,10 @@ impl<'a> ExecutionContext<'a> {
         let function_result = function(self);
         //println!("Eval result: {function_result:?} caller: {}", self.frame().function);
         
-        if let Value::Trampoline(Closure { callable_index, .. }) = &function_result {
+        if let Value::Trampoline(ClosurePointer(p)) = &function_result {
             //analyze the resulting trampoline, see if we should execute it or pass along
-            let callee = &self.functions[*callable_index as usize];
+            let Closure { callable_index, .. } = self.closures[*p as usize];
+            let callee = &self.functions[callable_index];
             if let Some(_) = callee.trampoline_of {
                 return function_result;  
             } else {
@@ -373,7 +387,9 @@ impl<'a> ExecutionContext<'a> {
         //The tail function call might have referenced something other than the current function args...
         let mut tco_env_set = false;
 
-        while let Value::Trampoline(Closure { callable_index, closure_env_index }) = current {
+        while let Value::Trampoline(ClosurePointer(p)) = current {
+            let Closure { callable_index, closure_env_index } = self.closures[p as usize];
+
             if !tco_env_set {
 
                 //TCO hack: we modify the current stack instead of creating a new one because
@@ -438,7 +454,8 @@ impl<'a> ExecutionContext<'a> {
         self.reusable_frames.push(popped_frame);
     }
 
-    fn make_new_frame(&mut self, function_name_index: Option<usize>, callable_index: u32, closure_env_index: u32, arguments: &[LambdaFunction]) {
+    fn make_new_frame(&mut self, function_name_index: Option<usize>, callable_index: usize, closure_env_index: usize, 
+        closure_pointer: ClosurePointer, arguments: &[LambdaFunction]) {
         let mut new_frame = match self.reusable_frames.pop() {
             Some(mut new_frame) => {
                 new_frame.function = callable_index as usize;
@@ -458,7 +475,7 @@ impl<'a> ExecutionContext<'a> {
         //To comply with the rest of the interpreter logic we also push the function name into the let bindings
         if let Some(function_name_index) = function_name_index {
             new_frame.let_bindings_pushed.push(function_name_index);
-            self.let_bindings[function_name_index].push(Value::Closure(Closure { callable_index, closure_env_index }));
+            self.let_bindings[function_name_index].push(Value::Closure(closure_pointer));
         }
         {
             let params = self.functions[callable_index as usize].parameters;
@@ -491,18 +508,23 @@ impl<'a> ExecutionContext<'a> {
         let f = evaluate_first(self);
         let s = evaluate_second(self);
         match (f, s) {
-            (Value::Int(a), Value::Int(b)) => Value::IntTuple(a, b),
+          /*   (Value::Int(a), Value::Int(b)) => Value::IntTuple(a, b),
             (Value::Bool(a), Value::Bool(b)) => Value::BoolTuple(a, b),
             (Value::Int(a), Value::Bool(b)) => Value::IntBoolTuple(a, b),
-            (Value::Bool(a), Value::Int(b)) => Value::BoolIntTuple(a, b),
+            (Value::Bool(a), Value::Int(b)) => Value::BoolIntTuple(a, b),*/
             (a, b) => {
                 let heap_a = self.heap.len();
                 self.heap.push(a);
                 let heap_b = self.heap.len();
                 self.heap.push(b);
-                Value::DynamicTuple(
-                    HeapPointer(heap_a as u32),
-                    HeapPointer(heap_b as u32),
+
+                let tuple_p = self.tuples.len();
+                self.tuples.push( 
+                    (HeapPointer(heap_a as u32),
+                     HeapPointer(heap_b as u32)));
+
+                Value::Tuple(
+                   TuplePointer(tuple_p as u32)
                 )
             }
         }
@@ -818,11 +840,14 @@ impl LambdaCompiler {
                 Box::new(move |ec: &mut ExecutionContext| {
                     let value = evaluate_value(ec);
                     match value {
-                        Value::DynamicTuple(a, _) => ec.heap[a.0 as usize].clone(),
-                        Value::IntTuple(a, _) => Value::Int(a),
+                        Value::Tuple(ptr) => {
+                            let (a, _) = &ec.tuples[ptr.0 as usize];
+                            ec.heap[a.0 as usize].clone()
+                        }
+                        /*Value::IntTuple(a, _) => Value::Int(a),
                         Value::BoolTuple(a, _) => Value::Bool(a),
                         Value::BoolIntTuple(a, _) => Value::Bool(a),
-                        Value::IntBoolTuple(a, _) => Value::Int(a),
+                        Value::IntBoolTuple(a, _) => Value::Int(a),*/
                         _ => panic!("Type error: Cannot evaluate first on this value: {value:?}"),
                     }
                 })
@@ -832,11 +857,14 @@ impl LambdaCompiler {
                 Box::new(move |ec: &mut ExecutionContext| {
                     let value = evaluate_value(ec);
                     match value {
-                        Value::DynamicTuple(_, a) => ec.heap[a.0 as usize].clone(),
-                        Value::IntTuple(_, a) => Value::Int(a),
+                        Value::Tuple(ptr) => {
+                            let (_, b) = &ec.tuples[ptr.0 as usize];
+                            ec.heap[b.0 as usize].clone()
+                        }
+                        /*Value::IntTuple(_, a) => Value::Int(a),
                         Value::BoolTuple(_, a) => Value::Bool(a),
                         Value::BoolIntTuple(_, a) => Value::Int(a),
-                        Value::IntBoolTuple(_, a) => Value::Bool(a),
+                        Value::IntBoolTuple(_, a) => Value::Bool(a),*/
                         _ => panic!("Type error: Cannot evaluate first on this value: {value:?}"),
                     }
                 })
@@ -923,7 +951,7 @@ impl LambdaCompiler {
 
             } else {
                 Box::new(move |ec: &mut ExecutionContext| {
-                    Value::Closure(ec.eval_closure_no_env(index_of_new_function as u32))
+                    Value::Closure(ec.eval_closure_no_env(index_of_new_function))
                 })
             }
         } else {
@@ -934,7 +962,7 @@ impl LambdaCompiler {
 
             } else {
                 Box::new(move |ec: &mut ExecutionContext| {
-                    Value::Trampoline(ec.eval_closure_no_env(index_of_new_function as u32))
+                    Value::Trampoline(ec.eval_closure_no_env(index_of_new_function))
                 })
             }
         }
