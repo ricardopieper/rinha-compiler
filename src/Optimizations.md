@@ -71,4 +71,12 @@ Suppose we have:
         call call, [from]
                 ...
         closure 0
-                        
+
+    So we only do the trampoline when we want to materialize the value.
+
+    Performance is the same, still needs optimization here...
+
+Off-Enum values
+
+    To reduce the size of copies of values when functions execute, some values were moved to vecs inside the 
+    ExecutionEngine struct. 24 bytes down to 12. Down to 2.9ms from 3.4ms.

@@ -1,8 +1,8 @@
 
 
-use crate::{
-    ast::BinaryOp
-};
+use std::collections::{HashSet, BTreeMap};
+
+use crate::ast::BinaryOp;
 
 use crate::hir::{Expr, FuncDecl};
 
@@ -16,9 +16,15 @@ pub struct Stats {
 
 #[derive(Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
 pub struct Closure {
-    pub callable_index: usize,
-    //  pub environment: Vec<Value>
+    pub callable_index: u32,
+    pub closure_env_index: u32
+    //pub environment: BTreeMap<usize, Value>
 }
+#[derive(Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
+pub struct HeapPointer(u32);
+
+#[derive(Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
+pub struct StringPointer(u32);
 
 /// Enum for runtime values
 #[derive(Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
@@ -26,33 +32,40 @@ pub enum Value {
     /// Ints
     Int(i32),
     Bool(bool),
-    Str(&'static str),
+    Str(StringPointer),
     IntTuple(i32, i32),
     BoolIntTuple(bool, i32),
     IntBoolTuple(i32, bool),
     BoolTuple(bool, bool),
-    DynamicTuple(Box<Value>, Box<Value>),
+    DynamicTuple(HeapPointer, HeapPointer),
     Closure(Closure),
     Trampoline(Closure),
-    Error(&'static str),
+    //Error(u32),
     //Unit,
     //None,
 }
 
 
-impl ToString for Value {
-    fn to_string(&self) -> String {
+impl Value {
+    fn to_string(&self, ec: &ExecutionContext) -> String {
         match self {
             Value::Trampoline(_) => "trampoline".to_string(),
             Value::Int(i) => i.to_string(),
-            Value::Str(s) => s.to_string(),
-            Value::DynamicTuple(a, b) => format!("({}, {})", a.to_string(), b.to_string()),
+            Value::Str(StringPointer(s)) => {
+                ec.string_values[*s as usize].to_string()
+            }
+            //@TODO read from box storage
+            Value::DynamicTuple(HeapPointer(a), HeapPointer(b)) => {
+                let a = &ec.heap[*a as usize];
+                let b = &ec.heap[*b as usize];
+                format!("({}, {})", a.to_string(ec), b.to_string(ec))
+            }
             Value::IntTuple(a, b) => format!("({}, {})", a.to_string(), b.to_string()),
             Value::BoolTuple(a, b) => format!("({}, {})", a.to_string(), b.to_string()),
             Value::IntBoolTuple(a, b) => format!("({}, {})", a.to_string(), b.to_string()),
             Value::BoolIntTuple(a, b) => format!("({}, {})", a.to_string(), b.to_string()),
             Value::Closure(..) => "function".to_string(),
-            Value::Error(e) => format!("error: {}", e),
+            //Value::Error(e) => format!("error: {}", e),
            // Value::Unit => "unit".to_string(),
             Value::Bool(b) => b.to_string(),
         }
@@ -62,10 +75,12 @@ impl ToString for Value {
 pub struct StackFrame {
     function: usize,
     pub let_bindings_pushed: Vec<usize>,
+    pub closure_environment: usize
 }
 
 pub struct Callable {
     pub parameters: &'static [usize],
+    pub closure_indices: &'static [usize],
     pub body: LambdaFunction,
     //pub location: Location,
     pub tco_optimized: bool,
@@ -76,9 +91,18 @@ pub struct ExecutionContext<'a> {
     pub call_stack: Vec<StackFrame>,
     pub functions: &'a [Callable],
     pub enable_memoization: bool,
+    //First vec represents the variable itself (there's only a set number of possible values),
+    //second vec represents the stack frame's value of that variable
     pub let_bindings: Vec<Vec<Value>>,
     pub reusable_frames: Vec<StackFrame>,
+    pub closure_environments: Vec<BTreeMap<usize, Value>>,
+    pub string_values: Vec<String>,
+    //most things are done in the "stack" for some definition of stack which is very loose here....
+    //this heap is for things like dynamic tuples that could very well be infinite.
+    //This makes the Value enum smaller than storing boxes directly
+    pub heap: Vec<Value>,
     pub stats: Stats,
+   
 }
 
 pub struct CompilationResult {
@@ -93,15 +117,20 @@ impl<'a> ExecutionContext<'a> {
             call_stack: vec![StackFrame {
                 function: usize::MAX,
                 let_bindings_pushed: vec![],
+                closure_environment: usize::MAX,
             }],
             functions: &program.functions,
             enable_memoization: true,
             let_bindings: vec![vec![]; program.strings.len()],
             reusable_frames: vec![],
+            closure_environments: vec![],
+            heap: vec![],
+            string_values: vec![],
             stats: Stats {
                 new_frames: 1,
                 reused_frames: 0,
             },
+            
         }
     }
 
@@ -109,8 +138,11 @@ impl<'a> ExecutionContext<'a> {
         self.enable_memoization = false;
     }
 
-    pub fn frame(&mut self) -> &mut StackFrame {
+    pub fn frame_mut(&mut self) -> &mut StackFrame {
         self.call_stack.last_mut().unwrap()
+    }
+    pub fn frame(&self) -> &StackFrame {
+        self.call_stack.last().unwrap()
     }
     pub fn pop_frame(&mut self) -> StackFrame {
         self.call_stack.pop().unwrap()
@@ -121,11 +153,37 @@ impl<'a> ExecutionContext<'a> {
 
 
     #[inline(always)]
-    fn eval_closure(&self, index_of_new_function: usize) -> Value {
-        Value::Closure(Closure {
-            callable_index: index_of_new_function,
-        })
+    fn eval_closure_no_env(&self, index_of_new_function: u32) -> Closure {
+        Closure {
+            callable_index: index_of_new_function as u32, closure_env_index: u32::MAX,
+        }
     }
+
+    #[inline(always)]
+    fn eval_closure_with_env(&mut self, index_of_new_function: usize) -> Closure {
+
+        let function = self.functions.get(index_of_new_function).unwrap();
+        let closure = function.closure_indices;
+
+       //start copy of values into environment
+        let mut environment = BTreeMap::new();
+        for idx in closure {
+            if let Some(v)  = self.let_bindings.get(*idx).unwrap().last() {
+                environment.insert(*idx, 
+                    v.clone()
+                );
+            }
+        }
+        //println!("{:#?}", environment);
+        let current_id = self.closure_environments.len();
+        self.closure_environments.push(environment);
+ 
+        Closure {
+            callable_index: index_of_new_function as u32, closure_env_index: current_id as u32
+        }
+    }
+
+    
 
     #[inline(always)]
     fn eval_int(&self, value: i32) -> Value {
@@ -147,7 +205,7 @@ impl<'a> ExecutionContext<'a> {
             *var_in_stack = bound_value;
         } else {
             frame_bindings.push(bound_value);
-            self.frame().let_bindings_pushed.push(var_index);
+            self.frame_mut().let_bindings_pushed.push(var_index);
         }
         //Does not run trampoline because it could be the last statement in the function, which would cause recursion
         let next = evaluate_next(self);
@@ -160,7 +218,21 @@ impl<'a> ExecutionContext<'a> {
         //println!("Trying to get var {index} {varname}");
         let var_stack = self.let_bindings.get(index);
         match var_stack {
-            Some(value) => value.last().unwrap().clone(), //will only be cloned and heap allocated on complex structures
+            Some(value) => match value.last() {
+                Some(s) => {
+                    s.clone()
+                }
+                None => {
+                    //try to load from environment
+                    let closure_env = self.frame().closure_environment;
+                    let env = &self.closure_environments[closure_env];
+                    if let Some(s) = env.get(&index) {
+                        s.clone()
+                    } else {
+                        panic!("Variable {varname} not found")
+                    }
+                }
+            }, //will only be cloned and heap allocated on complex structures
             None => panic!("Variable {varname} not found"),
         }
     }
@@ -199,8 +271,11 @@ impl<'a> ExecutionContext<'a> {
         match (&lhs, &rhs) {
             (Value::Int(lhs), Value::Int(rhs)) => Value::Int(lhs + rhs),
             (Value::Int(lhs), Value::Bool(rhs)) => Value::Int(lhs + *rhs as i32),
-            (_, Value::Str(_)) | (Value::Str(_), _) => {
-                Value::Str(format!("{}{}", lhs.to_string(), rhs.to_string()).leak())
+            (lhs, rhs @ Value::Str(..)) | (lhs @ Value::Str(..), rhs) => {
+                let str = format!("{}{}", lhs.to_string(self), rhs.to_string(self));
+                let current = StringPointer(self.string_values.len() as u32);
+                self.string_values.push(str);
+                Value::Str(current)
             }
             (Value::Bool(lhs), Value::Int(rhs)) => Value::Int(*lhs as i32 + *rhs),
             _ => panic!(
@@ -213,15 +288,15 @@ impl<'a> ExecutionContext<'a> {
         &mut self,
         evaluate_callee: &LambdaFunction,
         arguments: &Vec<LambdaFunction>,
-        function_name_index: usize,
+        function_name_index: Option<usize>,
         called_name: &str,
     ) -> Value {
         let callee_function = evaluate_callee(self);
-        let Value::Closure(Closure { callable_index }) = callee_function else {
+        let Value::Closure(Closure { callable_index, closure_env_index }) = callee_function else {
             panic!("Call to non-function value {called_name}")
         };
         {
-            let callable = &self.functions[callable_index];
+            let callable = &self.functions[callable_index as usize];
     
             if callable.parameters.len() != arguments.len() {
                 panic!("Wrong number of arguments for function {called_name}")
@@ -229,21 +304,21 @@ impl<'a> ExecutionContext<'a> {
            // println!("Calling {called_name}");
 
         }
-        self.make_new_frame(function_name_index, callable_index, arguments);
+        self.make_new_frame(function_name_index, callable_index, closure_env_index, arguments);
         //Erase the lifetime of the function pointer. This is a hack, forgive me for I have sinned.
         //Let it wreck havoc on the interpreter state if it wants.
         let function: &LambdaFunction =
-            unsafe { std::mem::transmute(&self.functions[callable_index].body) };
+            unsafe { std::mem::transmute(&self.functions[callable_index as usize].body) };
         let function_result = function(self);
         //println!("Eval result: {function_result:?} caller: {}", self.frame().function);
         
-        if let Value::Trampoline(Closure { callable_index }) = function_result {
+        if let Value::Trampoline(Closure { callable_index, .. }) = &function_result {
             //analyze the resulting trampoline, see if we should execute it or pass along
-            let callee = &self.functions[callable_index];
+            let callee = &self.functions[*callable_index as usize];
             if let Some(_) = callee.trampoline_of {
-                return Value::Trampoline(Closure {callable_index})    
+                return function_result;  
             } else {
-                println!("Value returned is a function but is not a TCO trampoline");
+                //println!("Value returned is a function but is not a TCO trampoline");
                 self.pop_frame_and_bindings();
                 return function_result;
             }
@@ -258,7 +333,7 @@ impl<'a> ExecutionContext<'a> {
 
 
     pub fn run_trampoline(&mut self, maybe_trampoline: Value) -> Value {
-        let mut current @ Value::Trampoline(_) = maybe_trampoline else {
+        let mut current @ Value::Trampoline(..) = maybe_trampoline else {
             return maybe_trampoline;
         };
 
@@ -266,11 +341,23 @@ impl<'a> ExecutionContext<'a> {
         //which needs to be destroyed after the while loop
         let num_stack_frames_before = self.call_stack.len(); 
 
-        while let Value::Trampoline(Closure { callable_index }) = current {
+        //even TCO'd functions have environments and they must be passed along somehow.
+        //The tail function call might have referenced something other than the current function args...
+        let mut tco_env_set = false;
+
+        while let Value::Trampoline(Closure { callable_index, closure_env_index }) = current {
+            if !tco_env_set {
+
+                //TCO hack: we modify the current stack instead of creating a new one because
+                //this is faster and TCO is already a huge hack.
+                self.call_stack.last_mut().unwrap().closure_environment = closure_env_index as usize;
+                tco_env_set = true;
+
+            }
+
             //println!("state {:#?}", ec.let_bindings);
-            let callee = &self.functions[callable_index];
+            let callee = &self.functions[callable_index as usize];
             //println!("Eval result: {function_result:?} caller: {}", self.frame().function);
-            
             /*
             In order for the trampoline mechanism to work, we must ensure we're not calling
             the trampoline inside the execution of the trampolined function. This would be the same as
@@ -284,11 +371,12 @@ impl<'a> ExecutionContext<'a> {
 
             let function: &LambdaFunction = unsafe { std::mem::transmute(&callee.body) };
 
-            //in theory we are in the same function, so just pass the current function along
-            //self.make_trampoline_frame(callable_index);
             //We don't need to setup a new stack frame because when we call this function, 
             //eval_call will run (because it's a *tail call optimization*), which will setup its own call stack.
-            //however, we count how many stacks 
+            //however, we count how many stacks we pushed and pop them all later
+
+        
+
             current = function(self);
 
             //self.pop_frame_and_bindings();
@@ -322,30 +410,33 @@ impl<'a> ExecutionContext<'a> {
         self.reusable_frames.push(popped_frame);
     }
 
-    fn make_new_frame(&mut self, function_name_index: usize, callable_index: usize, arguments: &[LambdaFunction]) {
+    fn make_new_frame(&mut self, function_name_index: Option<usize>, callable_index: u32, closure_env_idx: u32, arguments: &[LambdaFunction]) {
         let mut new_frame = match self.reusable_frames.pop() {
             Some(mut new_frame) => {
                 self.stats.reused_frames += 1;
-                new_frame.function = callable_index;
+                new_frame.function = callable_index as usize;
+                new_frame.closure_environment = closure_env_idx as usize;
                 new_frame
             }
             None => {
                 self.stats.new_frames += 1;
 
                 StackFrame {
-                    function: callable_index,
+                    function: callable_index as usize,
                     let_bindings_pushed: vec![],
+                    closure_environment: closure_env_idx as usize
                 }
             }
         };
 
         //In this new stack frame, we push the function name, so we can do recursion.
         //To comply with the rest of the interpreter logic we also push the function name into the let bindings
-
-        new_frame.let_bindings_pushed.push(function_name_index);
-        self.let_bindings[function_name_index].push(Value::Closure(Closure { callable_index }));
+        if let Some(function_name_index) = function_name_index {
+            new_frame.let_bindings_pushed.push(function_name_index);
+            self.let_bindings[function_name_index].push(Value::Closure(Closure { callable_index: callable_index, closure_env_index: closure_env_idx }));
+        }
         {
-            let params = self.functions[callable_index].parameters;
+            let params = self.functions[callable_index as usize].parameters;
             //evaluate the arguments
             for (argument, param) in arguments.iter().zip(params) {
                 let value = argument(self);
@@ -368,7 +459,16 @@ impl<'a> ExecutionContext<'a> {
             (Value::Bool(a), Value::Bool(b)) => Value::BoolTuple(a, b),
             (Value::Int(a), Value::Bool(b)) => Value::IntBoolTuple(a, b),
             (Value::Bool(a), Value::Int(b)) => Value::BoolIntTuple(a, b),
-            (a, b) => Value::DynamicTuple(Box::new(a), Box::new(b)),
+            (a, b) => {
+                let heap_a = self.heap.len();
+                self.heap.push(a);
+                let heap_b = self.heap.len();
+                self.heap.push(b);
+                Value::DynamicTuple(
+                    HeapPointer(heap_a as u32),
+                    HeapPointer(heap_b as u32),
+                )
+            }
         }
     }
 }
@@ -407,7 +507,7 @@ impl LambdaCompiler {
         self.strict_equals = false;
     }
 
-    pub fn intern_string(&mut self, s: &'static str) -> usize {
+    pub fn intern_var_name(&mut self, s: &'static str) -> usize {
         //check if it already exists
         if let Some(index) = self.var_names.iter().position(|x| x == &s) {
             return index;
@@ -438,23 +538,105 @@ impl LambdaCompiler {
     //but this idea does work in those cases too.
 
     //whenever a function is constructed, it captures the environment. This is a closure.
+    //also don't closure over let bindings
+    fn get_closure(&mut self, expr: &Expr, params: &mut HashSet<String>, current_fn_let_bindings: &mut HashSet<String>) -> HashSet<String> {
+        let empty = HashSet::new();
+        match expr {
+            Expr::Let { value, next, name } =>{
+                current_fn_let_bindings.insert(name.to_string());
+                let mut value_closure = self.get_closure(value, params, current_fn_let_bindings);
+                value_closure.extend(self.get_closure(next, params, current_fn_let_bindings));
+                return value_closure;
+            }
+            Expr::Var { name } => {
+                if params.contains(name) || current_fn_let_bindings.contains(name) {
+                    return empty;
+                } else {
+                    return HashSet::from_iter(vec![name.to_string()].into_iter());
+                }
+            }
+            Expr::Int {..} => empty,
+            Expr::Bool {..} => empty,
+            Expr::String {..} => empty,
+            Expr::If { cond, then, otherwise } =>{
+                let mut cond_closure = self.get_closure(cond, params, current_fn_let_bindings);
+                let then_closure = self.get_closure(then, params, current_fn_let_bindings);
+                let otherwise_closure = self.get_closure(otherwise, params, current_fn_let_bindings);
+                cond_closure.extend(then_closure);
+                cond_closure.extend(otherwise_closure);
+                cond_closure
+            }
+            Expr::Tuple { first, second } => {
+                let mut first_closure = self.get_closure(first, params, current_fn_let_bindings);
+                let second_closure = self.get_closure(second, params, current_fn_let_bindings);
+                first_closure.extend(second_closure);
 
-    fn compile_internal(&mut self, ast: Expr) -> LambdaFunction {
+                first_closure
+            }
+            Expr::First { value } => {
+                self.get_closure(value, params, current_fn_let_bindings)
+            }
+            Expr::Second { value } => {
+                self.get_closure(value, params, current_fn_let_bindings)
+            }
+            Expr::Print { value } => {
+                self.get_closure(value, params, current_fn_let_bindings)
+            }
+            Expr::FuncDecl(FuncDecl { is_tco_trampoline, .. }) if *is_tco_trampoline => {
+              
+               //this may be an extreme oversimplification, but tco trampolines don't close over anything
+               //they actually do but for them we can probably get away with it
+               empty 
+            }
+            Expr::FuncDecl(FuncDecl { params: func_params, body, .. }) => {
+                //the analysis of regular funcdecls, not trampolines, is done by analyzing it in isolation, 
+                //does not matter the context it is in.
+                //but in the case of a TCO trampoline, we detect the variables in params that were used in the call, and don't closure over them again
+                //we do this by extending the current params and passing along the chain
+                //the funcdecl itself has 0 parameters
+                //thi is an optimization, ```trampolines are generated in a very controlled way
+                let mut new_function_params = HashSet::new();
+                for p in func_params {
+                    new_function_params.insert(p.clone());
+                }
+                let mut new_let_bindings = HashSet::new();
+                self.get_closure(body, &mut new_function_params, &mut new_let_bindings)
+            }
+            Expr::FuncCall { func, args } => {
+                let mut f_closure = HashSet::new();
+
+                f_closure.extend(self.get_closure(func, params, current_fn_let_bindings));
+
+                for a in args {
+                    f_closure.extend(self.get_closure(a, params, current_fn_let_bindings));
+                }
+                f_closure
+            }
+            Expr::BinOp { left, right, .. } => {
+                let mut lhs_closure = self.get_closure(left, params, current_fn_let_bindings);
+                let rhs_closure = self.get_closure(right, params, current_fn_let_bindings);
+                lhs_closure.extend(rhs_closure);
+                lhs_closure
+            }
+        }
+    }
+
+    fn compile_internal(&mut self, ast: Expr, funcs_params: &mut HashSet<String>) -> LambdaFunction {
         let lambda: LambdaFunction = match ast {
             Expr::Print{ value } => {
-                let evaluate_printed_value = self.compile_internal(*value);
+                let evaluate_printed_value = self.compile_internal(*value, funcs_params);
                 //because the type of the expression is only known at runtime, we have to check it in the print function during runtime :(
                 Box::new(move |ec: &mut ExecutionContext| {
                     //println!("Stack frame on print: {:?}", ec.frame().let_bindings);
                     let value_to_print = evaluate_printed_value(ec);
-                    println!("{}", value_to_print.to_string());
+                    println!("{}", value_to_print.to_string(ec));
                     return value_to_print
                 })
             }
             Expr::Int{value } => Box::new(move |ec| ec.eval_int(value)),
             Expr::Var{ name, .. } => {
                 let varname_leaked: &'static str = name.leak();
-                let index = self.intern_string(varname_leaked);
+                let index = self.intern_var_name(varname_leaked);
 
                 Box::new(move |ec: &mut ExecutionContext| ec.eval_var(index, varname_leaked))
             }
@@ -468,12 +650,19 @@ impl LambdaCompiler {
                 if let Expr::FuncDecl(FuncDecl { params, body, ..  }) = &*value && name != "_" && self.is_tail_recursive(&body, &name) {
                     //the recursive call becomes a closure
                     let trampolined_function = self.into_tco(&body, &name);
-
+                    let mut all_function_params = HashSet::new();
+                    for p in params {
+                        all_function_params.insert(p.to_string());
+                    }
+                    let mut let_bindings = HashSet::new();
+                    let closure = self.get_closure(&trampolined_function, &mut all_function_params, &mut let_bindings);
+                    let closure_set: Vec<_> = closure.into_iter().collect();
+    
                     //println!("Function got TCO'd {trampolined_function:#?}");
-                    let evaluate_value = self.compile_function(trampolined_function, params, true, None);
-                    let evaluate_next = self.compile_internal(*next);
+                    let evaluate_value = self.compile_function(funcs_params, trampolined_function, params, &closure_set, true, None);
+                    let evaluate_next = self.compile_internal(*next, funcs_params);
                     let var_name_leaked: &'static str = name.leak();
-                    let var_index = self.intern_string(var_name_leaked);
+                    let var_index = self.intern_var_name(var_name_leaked);
                     Box::new(move |ec: &mut ExecutionContext| {
                         //println!("Evaluating Let {var_name_leaked} TCO");
                         ec.eval_let(&evaluate_value, &evaluate_next, var_index)
@@ -481,8 +670,8 @@ impl LambdaCompiler {
                     
                 }
                 else {
-                    let evaluate_value = self.compile_internal(*value);
-                    let evaluate_next = self.compile_internal(*next);
+                    let evaluate_value = self.compile_internal(*value, funcs_params);
+                    let evaluate_next = self.compile_internal(*next, funcs_params);
                     if name == "_" {
                         Box::new(move |ec: &mut ExecutionContext| {
                             evaluate_value(ec);
@@ -491,7 +680,7 @@ impl LambdaCompiler {
                         })
                     } else {
                         let var_name_leaked: &'static str = name.leak();
-                        let var_index = self.intern_string(var_name_leaked);
+                        let var_index = self.intern_var_name(var_name_leaked);
                         Box::new(move |ec: &mut ExecutionContext| {
                             //println!("Evaluating Let {var_name_leaked} non-tco");
                             //continuation into recursive call in next
@@ -502,45 +691,77 @@ impl LambdaCompiler {
             }
            
            // Expr::Error(e) => panic!("{}: {}", e.message, e.full_text),
-            Expr::BinOp { op, left, right } => self.compile_binexp(left, right, op),
+            Expr::BinOp { op, left, right } => self.compile_binexp(funcs_params, left, right, op),
             Expr::String{value} => {
-                let leaked: &'static str = value.leak();
-                Box::new(move |_| Value::Str(leaked))
+                //let leaked: &'static str = value.leak();
+                Box::new(move |ec| {
+                    let current = ec.string_values.len();
+                    ec.string_values.push(value.clone());
+                    Value::Str(StringPointer(current as u32))
+                })
             }
             Expr::FuncCall {
                 func, args
             } => match &*func {
                 Expr::Var {name} => {
                     let called_name: &'static str = name.clone().leak();
-                    let function_name_index = self.intern_string(called_name);
-                    let evaluate_callee = self.compile_internal(*func);
+                    let function_name_index = self.intern_var_name(called_name);
+                    let evaluate_callee = self.compile_internal(*func, funcs_params);
                     let arguments = args
                         .into_iter()
-                        .map(|arg| self.compile_internal(arg))
+                        .map(|arg| self.compile_internal(arg, funcs_params))
                         .collect::<Vec<_>>();
                     Box::new(move |ec: &mut ExecutionContext| {
                         //println!("Calling {called_name} {}", ec.frame().function);
                         let result = ec.eval_call(
                             &evaluate_callee,
                             &arguments,
-                            function_name_index,
+                            Some(function_name_index),
                             called_name,
                         );
                         //println!("Called {called_name} result = {result:?}");
                         result
                     })
                 }
-                _ => panic!("Cannot call non-var term"),
+                other => {
+                    let called_name: &'static str = "anonymous function";
+                    let evaluate_callee = self.compile_internal(other.clone(), funcs_params);
+                    let arguments = args
+                        .into_iter()
+                        .map(|arg| self.compile_internal(arg, funcs_params))
+                        .collect::<Vec<_>>();
+                    Box::new(move |ec: &mut ExecutionContext| {
+                        //println!("Calling {called_name} {}", ec.frame().function);
+                        let result = ec.eval_call(
+                            &evaluate_callee,
+                            &arguments,
+                            None,
+                            called_name,
+                        );
+                        //println!("Called {called_name} result = {result:?}");
+                        result
+                    })
+                }
             },
-            Expr::FuncDecl(FuncDecl {
-                params, body, is_tco_trampoline,
-            }) => {
+            fdecl @ Expr::FuncDecl(..) => {
+                //let it find the function params
+                let mut all_function_params = funcs_params.clone();
+                let mut let_bindings = HashSet::new();
+                let closure = self.get_closure(&fdecl.clone(), &mut all_function_params, &mut let_bindings);
+                let Expr::FuncDecl(FuncDecl {
+                    params, body, is_tco_trampoline,
+                }) = fdecl else {
+                    unreachable!()
+                };
+                
+                let closure_set: Vec<_> = closure.into_iter().collect();
+
                 let trampoline = if is_tco_trampoline {
                     Some(self.closure_stack.last().copied().unwrap())
                 } else {
                     None
                 };
-                self.compile_function(*body, &params, false, trampoline)
+                self.compile_function(funcs_params, *body, &params, &closure_set, false, trampoline)
             }
             Expr::If {
                 cond,
@@ -548,20 +769,20 @@ impl LambdaCompiler {
                 otherwise,
                 ..
             } => {
-                let evaluate_condition = self.compile_internal(*cond);
-                let evaluate_then = self.compile_internal(*then);
-                let evaluate_otherwise = self.compile_internal(*otherwise);
+                let evaluate_condition = self.compile_internal(*cond, funcs_params);
+                let evaluate_then = self.compile_internal(*then, funcs_params);
+                let evaluate_otherwise = self.compile_internal(*otherwise, funcs_params);
                 Box::new(move |ec: &mut ExecutionContext| {
                     ec.eval_if(&evaluate_condition, &evaluate_then, &evaluate_otherwise)
                 })
             }
             //only works on tuples
             Expr::First{ value, .. } => {
-                let evaluate_value = self.compile_internal(*value);
+                let evaluate_value = self.compile_internal(*value, funcs_params);
                 Box::new(move |ec: &mut ExecutionContext| {
                     let value = evaluate_value(ec);
                     match value {
-                        Value::DynamicTuple(a, _) => *a,
+                        Value::DynamicTuple(a, _) => ec.heap[a.0 as usize].clone(),
                         Value::IntTuple(a, _) => Value::Int(a),
                         Value::BoolTuple(a, _) => Value::Bool(a),
                         Value::BoolIntTuple(a, _) => Value::Bool(a),
@@ -571,11 +792,11 @@ impl LambdaCompiler {
                 })
             }
             Expr::Second{ value, .. } => {
-                let evaluate_value = self.compile_internal(*value);
+                let evaluate_value = self.compile_internal(*value, funcs_params);
                 Box::new(move |ec: &mut ExecutionContext| {
                     let value = evaluate_value(ec);
                     match value {
-                        Value::DynamicTuple(_, a) => *a,
+                        Value::DynamicTuple(_, a) => ec.heap[a.0 as usize].clone(),
                         Value::IntTuple(_, a) => Value::Int(a),
                         Value::BoolTuple(_, a) => Value::Bool(a),
                         Value::BoolIntTuple(_, a) => Value::Int(a),
@@ -586,8 +807,8 @@ impl LambdaCompiler {
             }
             Expr::Bool { value, .. } => Box::new(move |_| Value::Bool(value)),
             Expr::Tuple { first, second, .. } => {
-                let evaluate_first = self.compile_internal(*first);
-                let evaluate_second = self.compile_internal(*second);
+                let evaluate_first = self.compile_internal(*first, funcs_params);
+                let evaluate_second = self.compile_internal(*second, funcs_params);
                 Box::new(move |ec: &mut ExecutionContext| {
                     ec.eval_tuple(&evaluate_first, &evaluate_second)
                 })
@@ -607,7 +828,7 @@ impl LambdaCompiler {
 
     }
 
-    fn compile_function(&mut self, value: Expr, parameters: &[String], tco: bool, trampoline_of: Option<usize>) -> LambdaFunction {
+    fn compile_function(&mut self, funcs_params: &mut HashSet<String>,  value: Expr, parameters: &[String], closure: &[String], tco: bool, trampoline_of: Option<usize>) -> LambdaFunction {
         //Functions are compiled and stored into a big vector of functions, each one has a unique ID.
         //value will be the call itself, we're compiling the body of the tco trampoline
         //println!("Compile function: {value:#?} location: {location:?}");
@@ -616,14 +837,18 @@ impl LambdaCompiler {
             body: Box::new(|_| panic!("Empty body, function not compiled")),
             parameters: &[],
             tco_optimized: false,
-            trampoline_of: None
+            trampoline_of: None,
+            closure_indices: &[]
             //location
         };
         self.all_functions.push(callable);
         self.closure_stack.push(index_of_new_function);
-
+        let mut new_params = funcs_params.clone();
+        for param in parameters.iter() {
+            new_params.insert(param.to_string());
+        }
         //this will return the lambda for the call to iter
-        let new_function = self.compile_internal(value);
+        let new_function = self.compile_internal(value, &mut new_params);
 
         let parameters = parameters
             .into_iter()
@@ -631,8 +856,18 @@ impl LambdaCompiler {
             .collect::<Vec<_>>();
         let mut param_indices = vec![];
         for param in parameters {
-            let interned = self.intern_string(param.leak());
+            let interned = self.intern_var_name(param.leak());
             param_indices.push(interned);
+        }
+
+        let closure = closure
+            .into_iter()
+            .map(|param| param.clone())
+            .collect::<Vec<_>>();
+        let mut closure_indices = vec![];
+        for closure_param in closure {
+            let interned = self.intern_var_name(closure_param.leak());
+            closure_indices.push(interned);
         }
         let callable = self.all_functions.get_mut(index_of_new_function).unwrap();
         *callable = Callable {
@@ -640,19 +875,32 @@ impl LambdaCompiler {
             parameters: param_indices.leak(),
             tco_optimized: tco,
             trampoline_of,
+            closure_indices: closure_indices.leak()
             //location
         };
         self.closure_stack.pop();
         if trampoline_of.is_none() {
-            Box::new(move |ec: &mut ExecutionContext| {
-                //println!("Evaluating function at location {}", loc);
-                ec.eval_closure(index_of_new_function)
-            })
+            if callable.closure_indices.len() > 0 {
+                Box::new(move |ec: &mut ExecutionContext| {
+                    Value::Closure(ec.eval_closure_with_env(index_of_new_function))
+                })
+
+            } else {
+                Box::new(move |ec: &mut ExecutionContext| {
+                    Value::Closure(ec.eval_closure_no_env(index_of_new_function as u32))
+                })
+            }
         } else {
-            Box::new(move |_| {
-                //println!("Evaluating function at location {}", loc);
-                Value::Trampoline(Closure { callable_index: index_of_new_function })
-            })
+            if callable.closure_indices.len() > 0 {
+                Box::new(move |ec: &mut ExecutionContext| {
+                    Value::Trampoline(ec.eval_closure_with_env(index_of_new_function))
+                })
+
+            } else {
+                Box::new(move |ec: &mut ExecutionContext| {
+                    Value::Trampoline(ec.eval_closure_no_env(index_of_new_function as u32))
+                })
+            }
         }
     }
 
@@ -701,7 +949,8 @@ impl LambdaCompiler {
     }
 
     pub fn compile(mut self, ast: Expr) -> CompilationResult {
-        let main = self.compile_internal(ast);
+        let mut params = HashSet::new();
+        let main = self.compile_internal(ast, &mut params);
         //trampolinize the returned value
         let trampolinized = Box::new(move |ec: &mut ExecutionContext| {
             ec.run_lambda_trampoline(&main)
@@ -715,12 +964,13 @@ impl LambdaCompiler {
 
     fn compile_binexp(
         &mut self,
+        funcs_params: &mut HashSet<String>,
         lhs: Box<Expr>,
         rhs: Box<Expr>,
         op: BinaryOp,
     ) -> LambdaFunction {
-        let evaluate_lhs = self.compile_internal(*lhs);
-        let evaluate_rhs = self.compile_internal(*rhs);
+        let evaluate_lhs = self.compile_internal(*lhs, funcs_params);
+        let evaluate_rhs = self.compile_internal(*rhs, funcs_params);
 
         macro_rules! int_binary_numeric_op {
             ($op:tt) => {
@@ -749,7 +999,9 @@ impl LambdaCompiler {
                             (Value::Int(lhs), Value::Int(rhs)) => {
                                 Value::Bool(lhs $op rhs)
                             }
-                            (Value::Str(lhs), Value::Str(rhs)) => {
+                            (Value::Str(StringPointer(lhs)), Value::Str(StringPointer(rhs))) => {
+                                let lhs = &ec.string_values[*lhs as usize];
+                                let rhs = &ec.string_values[*rhs as usize];
                                 Value::Bool(lhs $op rhs)
                             }
                             (Value::Bool(lhs), Value::Bool(rhs)) => {

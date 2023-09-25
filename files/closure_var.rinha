@@ -1,0 +1,7 @@
+let func = fn() => {
+    let x = 1;
+    fn() => {
+        x
+    }
+};
+print(func()())

@@ -1,5 +1,5 @@
 use criterion::{BenchmarkId, Criterion};
-use rinha::{
+use lambda_rinha::{
     lambda_compiler::{CompilationResult, ExecutionContext, LambdaCompiler},
     parser, hir::ast_to_hir,
 };
