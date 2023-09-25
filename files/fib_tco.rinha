@@ -1,0 +1,9 @@
+let fib_tc = fn (n, a, b) => {
+  if (n == 0) {
+    a
+  } else {
+    fib_tc(n - 1, b, a + b)
+  }
+};
+let _ = print("fib_tc(100000): " + fib_tc(100000, 0, 1));
+print("Done showcase")

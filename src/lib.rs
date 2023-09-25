@@ -1,4 +1,5 @@
 #![feature(let_chains)]
+#![feature(iter_collect_into)]
 use lalrpop_util::lalrpop_mod;
 
 pub mod hir;

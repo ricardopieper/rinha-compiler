@@ -94,20 +94,20 @@ pub struct ExecutionContext<'a> {
     //First vec represents the variable itself (there's only a set number of possible values),
     //second vec represents the stack frame's value of that variable
     pub let_bindings: Vec<Vec<Value>>,
+    pub arg_eval_buffer: Vec<Vec<Value>>,
     pub reusable_frames: Vec<StackFrame>,
     pub closure_environments: Vec<BTreeMap<usize, Value>>,
     pub string_values: Vec<String>,
     //most things are done in the "stack" for some definition of stack which is very loose here....
     //this heap is for things like dynamic tuples that could very well be infinite.
     //This makes the Value enum smaller than storing boxes directly
-    pub heap: Vec<Value>,
-    pub stats: Stats,
+    pub heap: Vec<Value>
    
 }
 
 pub struct CompilationResult {
     pub main: LambdaFunction,
-    pub strings: Vec<&'static str>,
+    pub strings: Vec<String>,
     pub functions: Vec<Callable>,
 }
 
@@ -119,6 +119,7 @@ impl<'a> ExecutionContext<'a> {
                 let_bindings_pushed: vec![],
                 closure_environment: usize::MAX,
             }],
+            arg_eval_buffer: vec![],
             functions: &program.functions,
             enable_memoization: true,
             let_bindings: vec![vec![]; program.strings.len()],
@@ -126,10 +127,6 @@ impl<'a> ExecutionContext<'a> {
             closure_environments: vec![],
             heap: vec![],
             string_values: vec![],
-            stats: Stats {
-                new_frames: 1,
-                reused_frames: 0,
-            },
             
         }
     }
@@ -151,15 +148,12 @@ impl<'a> ExecutionContext<'a> {
         self.call_stack.push(frame);
     }
 
-
-    #[inline(always)]
     fn eval_closure_no_env(&self, index_of_new_function: u32) -> Closure {
         Closure {
             callable_index: index_of_new_function as u32, closure_env_index: u32::MAX,
         }
     }
 
-    #[inline(always)]
     fn eval_closure_with_env(&mut self, index_of_new_function: usize) -> Closure {
 
         let function = self.functions.get(index_of_new_function).unwrap();
@@ -183,14 +177,10 @@ impl<'a> ExecutionContext<'a> {
         }
     }
 
-    
-
-    #[inline(always)]
     fn eval_int(&self, value: i32) -> Value {
         return Value::Int(value);
     }
 
-    #[inline(always)]
     fn eval_let(
         &mut self,
         evaluate_value: &LambdaFunction,
@@ -212,32 +202,67 @@ impl<'a> ExecutionContext<'a> {
         return next;
     }
 
-    #[inline(always)]
-    fn eval_var(&self, index: usize, varname: &'static str) -> Value {
+    fn eval_var(&self, index: usize) -> Value {
         //@PERF no clone pls
         //println!("Trying to get var {index} {varname}");
         let var_stack = self.let_bindings.get(index);
         match var_stack {
             Some(value) => match value.last() {
                 Some(s) => {
+                    //println!("Loading var {varname} {index}");
                     s.clone()
                 }
                 None => {
                     //try to load from environment
                     let closure_env = self.frame().closure_environment;
                     let env = &self.closure_environments[closure_env];
+                    //println!("Loading closure var {varname} {index}");
+
                     if let Some(s) = env.get(&index) {
                         s.clone()
                     } else {
-                        panic!("Variable {varname} not found")
+                        let var_name = &self.string_values[index];
+                        panic!("Variable {var_name} not found")
                     }
                 }
             }, //will only be cloned and heap allocated on complex structures
-            None => panic!("Variable {varname} not found"),
+            None => {
+                let var_name = &self.string_values[index];
+                panic!("Variable {var_name} not found")
+            }
         }
     }
 
-    #[inline(always)]
+    fn eval_var_ref(&self, index: usize) -> &Value {
+        let var_stack = self.let_bindings.get(index);
+
+        match var_stack {
+            Some(value) => match value.last() {
+                Some(s) => {
+                    //println!("Loading var {varname} {index}");
+                    s
+                }
+                None => {
+                    //try to load from environment
+                    let closure_env = self.frame().closure_environment;
+                    let env = &self.closure_environments[closure_env];
+                    //println!("Loading closure var {varname} {index}");
+
+                    if let Some(s) = env.get(&index) {
+                        s
+                    } else {
+                        let var_name = &self.string_values[index];
+                        panic!("Variable {var_name} not found")
+                    }
+                }
+            }, //will only be cloned and heap allocated on complex structures
+            None => {
+                let var_name = &self.string_values[index];
+                panic!("Variable {var_name} not found")
+            }
+        }
+    }
+
     fn eval_if(
         &mut self,
         evaluate_condition: &LambdaFunction,
@@ -269,7 +294,10 @@ impl<'a> ExecutionContext<'a> {
         let lhs = self.run_lambda_trampoline(&evaluate_lhs);
         let rhs = self.run_lambda_trampoline(&evaluate_rhs);
         match (&lhs, &rhs) {
-            (Value::Int(lhs), Value::Int(rhs)) => Value::Int(lhs + rhs),
+            (Value::Int(lhs), Value::Int(rhs)) => {
+                //println!("Sum {lhs} {rhs}");
+                Value::Int(lhs + rhs)
+            }
             (Value::Int(lhs), Value::Bool(rhs)) => Value::Int(lhs + *rhs as i32),
             (lhs, rhs @ Value::Str(..)) | (lhs @ Value::Str(..), rhs) => {
                 let str = format!("{}{}", lhs.to_string(self), rhs.to_string(self));
@@ -410,21 +438,18 @@ impl<'a> ExecutionContext<'a> {
         self.reusable_frames.push(popped_frame);
     }
 
-    fn make_new_frame(&mut self, function_name_index: Option<usize>, callable_index: u32, closure_env_idx: u32, arguments: &[LambdaFunction]) {
+    fn make_new_frame(&mut self, function_name_index: Option<usize>, callable_index: u32, closure_env_index: u32, arguments: &[LambdaFunction]) {
         let mut new_frame = match self.reusable_frames.pop() {
             Some(mut new_frame) => {
-                self.stats.reused_frames += 1;
                 new_frame.function = callable_index as usize;
-                new_frame.closure_environment = closure_env_idx as usize;
+                new_frame.closure_environment = closure_env_index as usize;
                 new_frame
             }
             None => {
-                self.stats.new_frames += 1;
-
                 StackFrame {
                     function: callable_index as usize,
                     let_bindings_pushed: vec![],
-                    closure_environment: closure_env_idx as usize
+                    closure_environment: closure_env_index as usize
                 }
             }
         };
@@ -433,16 +458,27 @@ impl<'a> ExecutionContext<'a> {
         //To comply with the rest of the interpreter logic we also push the function name into the let bindings
         if let Some(function_name_index) = function_name_index {
             new_frame.let_bindings_pushed.push(function_name_index);
-            self.let_bindings[function_name_index].push(Value::Closure(Closure { callable_index: callable_index, closure_env_index: closure_env_idx }));
+            self.let_bindings[function_name_index].push(Value::Closure(Closure { callable_index, closure_env_index }));
         }
         {
             let params = self.functions[callable_index as usize].parameters;
-            //evaluate the arguments
-            for (argument, param) in arguments.iter().zip(params) {
-                let value = argument(self);
+            
+            let mut buf = if let Some(b) = self.arg_eval_buffer.pop() {
+                b
+            } else {
+                vec![]
+            };
+
+            buf.clear();
+            arguments.iter()
+                .map(|argument| (argument(self)))
+                .collect_into(&mut buf);
+                //evaluate the arguments
+            for (argument, param) in buf.iter().zip(params) {
                 new_frame.let_bindings_pushed.push(*param);
-                self.let_bindings[*param].push(value);
+                self.let_bindings[*param].push(argument.clone());
             }
+            self.arg_eval_buffer.push(buf);
         }
         self.push_frame(new_frame);
     }
@@ -476,7 +512,7 @@ impl<'a> ExecutionContext<'a> {
 pub struct LambdaCompiler {
     //this is added into during compilation, but should be moved into the execution context later
     pub all_functions: Vec<Callable>,
-    pub var_names: Vec<&'static str>,
+    pub var_names: Vec<String>,
     pub strict_equals: bool,
     pub closure_stack: Vec<usize>
 }
@@ -507,14 +543,14 @@ impl LambdaCompiler {
         self.strict_equals = false;
     }
 
-    pub fn intern_var_name(&mut self, s: &'static str) -> usize {
+    pub fn intern_var_name(&mut self, s: &str) -> usize {
         //check if it already exists
         if let Some(index) = self.var_names.iter().position(|x| x == &s) {
             return index;
         }
 
         let index = self.var_names.len();
-        self.var_names.push(s);
+        self.var_names.push(s.to_string());
         index
     }
 
@@ -638,7 +674,7 @@ impl LambdaCompiler {
                 let varname_leaked: &'static str = name.leak();
                 let index = self.intern_var_name(varname_leaked);
 
-                Box::new(move |ec: &mut ExecutionContext| ec.eval_var(index, varname_leaked))
+                Box::new(move |ec: &mut ExecutionContext| ec.eval_var(index))
             }
            
             Expr::Let{
@@ -962,6 +998,197 @@ impl LambdaCompiler {
         }
     }
 
+  
+    fn compile_binexp_opt<'a>(
+        &mut self,
+        lhs: Box<Expr>,
+        rhs: Box<Expr>,
+        op: BinaryOp,
+    ) -> Option<LambdaFunction> { 
+        macro_rules! comparison_op {
+            ($lhs:expr, $rhs:expr, $ec:expr, $op:tt) => {
+                match ($lhs, $rhs) {
+                    (Value::Int(lhs), Value::Int(rhs)) => {
+                        //println!("Sum {lhs} {rhs}");
+                        Value::Bool(lhs $op rhs)
+                    },
+                    (Value::Str(StringPointer(lhs)), Value::Str(StringPointer(rhs))) => {
+                        let lhs = &$ec.string_values[*lhs as usize];
+                        let rhs = &$ec.string_values[*rhs as usize];
+                        Value::Bool(lhs $op rhs)
+                    }
+                    (Value::Bool(lhs), Value::Bool(rhs)) => {
+                        Value::Bool(lhs $op rhs)
+                    }
+                    _ => panic!(
+                        "Type error: Cannot apply binary operator {op} on these values: {lhs:?} and {rhs:?}",
+                        op = stringify!($op)
+                    ),
+                }
+            }
+        }
+
+        macro_rules! binary_and_or {
+            ($lhs:expr, $rhs:expr, $ec:expr, $op:tt) => {
+                match ($lhs, $rhs) {
+                    (Value::Bool(lhs), Value::Bool(rhs)) => {
+                        //println!("Sum {lhs} {rhs}");
+                        Value::Bool(*lhs $op *rhs)
+                    },
+                    _ => panic!(
+                        "Type error: Cannot apply binary operator {op} on these values: {lhs:?} and {rhs:?}",
+                        op = stringify!($op)
+                    ),
+                }
+            };
+        }
+
+        macro_rules! int_arith_op {
+            ($lhs:expr, $rhs:expr, $ec:expr, $op:tt) => {
+                match ($lhs, $rhs) {
+                    (Value::Int(lhs), Value::Int(rhs)) => {
+                        //println!("Sum {lhs} {rhs}");
+                        Value::Int(lhs $op rhs)
+                    }
+                    _ => panic!(
+                        "Type error: Cannot apply binary operator {op} on these values: {lhs:?} and {rhs:?}",
+                        op = stringify!($op)
+                    ),
+                }
+            }
+        }
+
+        macro_rules! binop_add {
+            ($lhs:expr, $rhs:expr, $ec:expr, $op:tt) => {
+                match ($lhs, $rhs) {
+                    (Value::Int(lhs), Value::Int(rhs)) => {
+                        //println!("Sum {lhs} {rhs}");
+                        Value::Int(lhs + rhs)
+                    }
+                    (lhs, rhs @ Value::Str(..)) | (lhs @ Value::Str(..), rhs) => {
+                        let str = format!("{}{}", lhs.to_string($ec), rhs.to_string($ec));
+                        let current = StringPointer($ec.string_values.len() as u32);
+                        $ec.string_values.push(str);
+                        Value::Str(current)
+                    }
+                    _ => panic!(
+                        "Type error: Cannot apply binary operator + on these values: {lhs:?} and {rhs:?}"
+                    ),
+                }
+            };
+        }
+
+        macro_rules! dispatch_bin_op {
+            ($mode:ident, $op:tt) => {
+                match $op {
+                    BinaryOp::Add => $mode!(+, binop_add),
+                    BinaryOp::Sub => $mode!(-, int_arith_op),
+                    BinaryOp::Mul => $mode!(*, int_arith_op),
+                    BinaryOp::Div => $mode!(/, int_arith_op),
+                    BinaryOp::Rem => $mode!(%, int_arith_op),
+                    BinaryOp::Eq => $mode!(==, comparison_op),
+                    BinaryOp::Neq => $mode!(!=, comparison_op),
+                    BinaryOp::Lt => $mode!(<, comparison_op),
+                    BinaryOp::Gt => $mode!(>, comparison_op),
+                    BinaryOp::Lte => $mode!(<=, comparison_op),
+                    BinaryOp::Gte => $mode!(>=, comparison_op),
+                    BinaryOp::And => $mode!(&&, binary_and_or),
+                    BinaryOp::Or => $mode!(||, binary_and_or),
+                }
+            };
+        }
+
+        let e = (&*lhs, &*rhs);
+        let result: LambdaFunction = match e {
+         
+            //If we know beforehand that both sides are var, avoid doing too much indirection just to get the var values
+            (Expr::Var { name: lhs_name }, Expr::Var { name: rhs_name }) => {
+                
+                let index_lhs = self.intern_var_name(lhs_name);
+                let index_rhs = self.intern_var_name(rhs_name);
+
+                macro_rules! variable_binop {
+                    ($op:tt, $operation_name:ident) => {
+                        Box::new(move |ec: &mut ExecutionContext| {
+                            let lhs = ec.eval_var_ref(index_lhs);
+                            let rhs = ec.eval_var_ref(index_rhs);
+                           
+                            $operation_name!(lhs, rhs, ec, $op)
+                        })
+                    }
+                }
+                dispatch_bin_op!(variable_binop, op)
+            }
+             //LHS is var, RHS is int
+            (Expr::Var { name: lhs_name }, Expr::Int { value } ) => {
+                
+                let index_lhs = self.intern_var_name(lhs_name);
+                let int_value = Value::Int(*value);
+                macro_rules! variable_int_binop {
+                    ($op:tt, $operation_name:ident) => {
+                        Box::new(move |ec: &mut ExecutionContext| {
+                            let lhs = ec.eval_var_ref(index_lhs);
+                            $operation_name!(lhs, &int_value, ec, $op)
+                        })
+                    }
+                }
+                dispatch_bin_op!(variable_int_binop, op)
+            }
+            //LHS is var, RHS is bool
+            (Expr::Var { name: lhs_name }, Expr::Bool { value } ) => {
+                
+                let index_lhs = self.intern_var_name(lhs_name);
+                let bool_value = Value::Bool(*value);
+
+                macro_rules! variable_int_binop {
+                    ($op:tt, $operation_name:ident) => {
+                        Box::new(move |ec: &mut ExecutionContext| {
+                            let lhs = ec.eval_var_ref(index_lhs);
+                            $operation_name!(lhs, &bool_value, ec, $op)
+                        })
+                    }
+                }
+                dispatch_bin_op!(variable_int_binop, op)
+            }
+             //LHS is int, RHS is var
+             ( Expr::Int { value }, Expr::Var { name: lhs_name } ) => {
+                
+                let int_value = Value::Int(*value);
+                let index_rhs = self.intern_var_name(lhs_name);
+
+                macro_rules! variable_int_binop {
+                    ($op:tt, $operation_name:ident) => {
+                        Box::new(move |ec: &mut ExecutionContext| {
+                            let rhs = ec.eval_var_ref(index_rhs);
+                            $operation_name!(&int_value, rhs, ec, $op)
+                        })
+                    }
+                }
+                dispatch_bin_op!(variable_int_binop, op)
+            }
+            //LHS is bool, RHS is var
+            ( Expr::Bool { value }, Expr::Var { name: lhs_name } ) => {
+                
+                let bool_value = Value::Bool(*value);
+                let index_rhs = self.intern_var_name(lhs_name);
+
+                macro_rules! variable_int_binop {
+                    ($op:tt, $operation_name:ident) => {
+                        Box::new(move |ec: &mut ExecutionContext| {
+                            let rhs = ec.eval_var_ref(index_rhs);
+                            $operation_name!(&bool_value, rhs, ec, $op)
+                        })
+                    }
+                }
+                dispatch_bin_op!(variable_int_binop, op)
+            }
+            //we could do constant folding here
+            _ => return None
+        };
+        return Some(result)
+    }
+
+
     fn compile_binexp(
         &mut self,
         funcs_params: &mut HashSet<String>,
@@ -969,6 +1196,14 @@ impl LambdaCompiler {
         rhs: Box<Expr>,
         op: BinaryOp,
     ) -> LambdaFunction {
+
+        //tries to return an optimized version that does less eval_calls
+        let optimized = self.compile_binexp_opt(lhs.clone(), rhs.clone(), op.clone());
+        if let Some(opt) = optimized {
+            return opt;
+        }
+
+
         let evaluate_lhs = self.compile_internal(*lhs, funcs_params);
         let evaluate_rhs = self.compile_internal(*rhs, funcs_params);
 

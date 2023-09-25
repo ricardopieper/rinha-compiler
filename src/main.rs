@@ -3,8 +3,10 @@
 #![recursion_limit = "256"]
 #![feature(assert_matches)]
 #![feature(let_chains)]
+#![feature(iter_collect_into)]
 
 use clap::Parser;
+use clap::ValueEnum;
 use lalrpop_util::lalrpop_mod;
 use miette::IntoDiagnostic;
 use owo_colors::OwoColorize;
@@ -30,6 +32,12 @@ pub mod hir;
 
 pub mod lambda_compiler;
 
+#[derive(Clone, Debug, ValueEnum, Eq, PartialEq)]
+pub enum Mode {
+    Rinha,
+    Interpreter
+}
+
 /// Simple program to run `rinha` language.
 #[derive(clap::Parser, Debug)]
 #[command(author, version, about, long_about = None)]
@@ -41,8 +49,9 @@ pub struct Command {
     /// The file we would like to run, type check, etc
     pub main: String,
 
-    #[clap(long, short, default_value = "true")]
-    pub rinha_mode: bool,
+    #[clap(long, short)]
+    #[clap(value_enum, default_value_t=Mode::Rinha)]
+    pub mode: Mode,
 }
 
 /// Logger function for the fern logger.
@@ -86,7 +95,7 @@ fn program() -> miette::Result<()> {
     // Parse the command line arguments
     let command = Command::parse();
     let file = std::fs::read_to_string(&command.main).into_diagnostic()?;
-    if command.rinha_mode {
+    if command.mode == Mode::Rinha {
 
         //deserialize into file
 
@@ -117,7 +126,6 @@ fn program() -> miette::Result<()> {
         (program.main)(&mut ee);
         let end = std::time::Instant::now();
         println!("Run Time: {:?}", end - start);
-        println!("Stats: {:#?}", ee.stats);
     
     }
     Ok(())
