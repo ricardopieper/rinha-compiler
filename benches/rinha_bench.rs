@@ -41,6 +41,19 @@ let iteration = iter(0, 100, work, 0);
 print(iteration)
 ";
 
+
+
+const FIB_30: &'static str = "
+let fib = fn (n) => {
+  if (n < 2) {
+    n
+  } else {
+    fib(n - 1) + fib(n - 2)
+  }
+};
+print (\"fib\" + fib(30))
+";
+
 pub fn criterion_benchmark(c: &mut Criterion) {
 
     let mut group = c
@@ -58,6 +71,18 @@ pub fn criterion_benchmark(c: &mut Criterion) {
             });
         },
     );
+    group.bench_with_input(
+      BenchmarkId::new("rinha-bench-fib", "fib30"),
+      &FIB_30,
+      |b, &program| {
+          let compiled = compile(&program);
+
+          b.iter(|| {
+              let mut ec = ExecutionContext::new(&compiled);
+              (compiled.main)(&mut ec);
+          });
+      },
+  );
 }
 
 fn main(){

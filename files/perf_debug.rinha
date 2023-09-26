@@ -1,4 +1,5 @@
 let iter = fn (from, to, call, prev) => {
+  let _ = print("Iter: From = " + from + ", To = "+ to);
   if (from < to) {
     let res = call(from);
     iter(from + 1, to, call, res)
@@ -8,17 +9,23 @@ let iter = fn (from, to, call, prev) => {
 };
 
 let work = fn(x) => {
+  let _ = print("Work: x = " + x);
+
   let work_closure = fn(y) => {
+    let _ = print("work_closure: y = " + y+ ", x = " + x);
+
     let xx = x * y;
     let tupl = (xx, x);
     let f = first(tupl);
     let s = second(tupl);
-    f * s
+    let r = f * s;
+    let _ = print("work_closure: R = " + r);
+    r
   };
 
-  iter(0, 200, work_closure, 0)
+  iter(0, 3, work_closure, 0)
 };
 
 let iteration = iter(0, 100, work, 0);
 
-print(iteration)
+print("Final result: " + iteration)
