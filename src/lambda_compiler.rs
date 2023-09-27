@@ -14,28 +14,28 @@ pub struct Stats {
     pub reused_frames: usize,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
+#[derive(Clone,  Copy,Debug, Eq, PartialEq, PartialOrd, Ord)]
 pub struct Closure {
     pub callable_index: usize,
     pub closure_env_index: usize
     //pub environment: BTreeMap<usize, Value>
 }
-#[derive(Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, PartialOrd, Ord)]
 pub struct HeapPointer(u32);
 
-#[derive(Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, PartialOrd, Ord)]
 pub struct StringPointer(u32);
 
 
-#[derive(Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, PartialOrd, Ord)]
 pub struct ClosurePointer(u32);
 
 
-#[derive(Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
+#[derive(Clone,  Copy,Debug, Eq, PartialEq, PartialOrd, Ord)]
 pub struct TuplePointer(u32);
 
 /// Enum for runtime values
-#[derive(Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, PartialOrd, Ord)]
 pub enum Value {
     Int(i32),
     Bool(bool),
@@ -55,7 +55,6 @@ impl Value {
             Value::Str(StringPointer(s)) => {
                 ec.string_values[*s as usize].to_string()
             }
-       
             Value::Tuple(TuplePointer(t)) => {
                 let (f, s) = &ec.tuples[*t as usize];
                 let a = &ec.heap[f.0 as usize];
@@ -181,7 +180,7 @@ impl<'a> ExecutionContext<'a> {
         for idx in closure {
             if let Some(v)  = self.let_bindings.get(*idx).unwrap().last() {
                 environment.insert(*idx, 
-                    v.clone()
+                    *v
                 );
             }
         }
@@ -231,7 +230,7 @@ impl<'a> ExecutionContext<'a> {
             Some(value) => match value.last() {
                 Some(s) => {
                     //println!("Loading var {varname} {index}");
-                    s.clone()
+                    *s
                 }
                 None => {
                     //try to load from environment
@@ -240,7 +239,7 @@ impl<'a> ExecutionContext<'a> {
                     //println!("Loading closure var {varname} {index}");
 
                     if let Some(s) = env.get(&index) {
-                        s.clone()
+                        *s
                     } else {
                         let var_name = &self.string_values[index];
                         panic!("Variable {var_name} not found")

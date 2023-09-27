@@ -33,12 +33,10 @@ let work = fn(x) => {
     f * s
   };
 
-  iter(0, 200, work_closure, 0)
+  iter(0, 500, work_closure, 0)
 };
 
-let iteration = iter(0, 100, work, 0);
-
-print(iteration)
+iter(0, 500, work, 0)
 ";
 
 
@@ -58,7 +56,7 @@ pub fn criterion_benchmark(c: &mut Criterion) {
 
     let mut group = c
       .benchmark_group("rinha-bench");
-    group.sample_size(30);
+    group.sample_size(40);
     group.bench_with_input(
         BenchmarkId::new("rinha-bench", "iterative"),
         &PERF_PROGRAM,
