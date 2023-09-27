@@ -80,3 +80,21 @@ Off-Enum values
 
     To reduce the size of copies of values when functions execute, some values were moved to vecs inside the 
     ExecutionEngine struct. 24 bytes down to 12. Down to 2.9ms from 3.4ms.
+
+Off-Enum closures and strings
+
+    Closures are 8 bytes, and strings are 8 byte pointers.
+    Same as off-enum values, they were moved into off-value storage inside ExecutionEngine. From 12 to 8 bytes.
+    Down to 2.5ms from 2.9.
+
+Frame reuse in TCO
+
+    Finally addressed frame reutilization in TCO. Turns out this is just a flag on the stack frame.
+    2.2ms.
+
+Empty Closure Optimization
+
+    During Off-enum closure work, we ended up creating an ever-expanding closure array that for every function call needed a new closure in this array.
+    Turns out most of the time we need empty closures, so we preallocate them and ref them.
+
+    No performance improvements, but some benchmarks now run without memory issues.

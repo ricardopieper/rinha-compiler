@@ -118,6 +118,16 @@ pub struct CompilationResult {
 
 impl<'a> ExecutionContext<'a> {
     pub fn new(program: &'a CompilationResult) -> Self {
+
+        //whenever we want an empty closure, we'll access by the function index into closures without allocating a new one
+        let empty_closures = {
+            let mut closures = vec![];
+            for (i, _) in program.functions.iter().enumerate() {
+                closures.push(Closure { callable_index: i, closure_env_index: usize::MAX })
+            }
+            closures
+        };
+
         Self {
             call_stack: vec![StackFrame {
                 function: usize::MAX,
@@ -134,7 +144,7 @@ impl<'a> ExecutionContext<'a> {
             heap: vec![],
             string_values: vec![],
             tuples: vec![],
-            closures: vec![]
+            closures: empty_closures
             
         }
     }
@@ -157,12 +167,7 @@ impl<'a> ExecutionContext<'a> {
     }
 
     fn eval_closure_no_env(&mut self, index_of_new_function: usize) -> ClosurePointer {
-        let closure =  Closure {
-            callable_index: index_of_new_function, closure_env_index: usize::MAX,
-        };
-        let closure_p = self.closures.len();
-        self.closures.push(closure);
-        return ClosurePointer(closure_p as u32);
+        return ClosurePointer(index_of_new_function as u32)
     }
 
     fn eval_closure_with_env(&mut self, index_of_new_function: usize) -> ClosurePointer {
@@ -732,7 +737,7 @@ impl LambdaCompiler {
                 //because the type of the expression is only known at runtime, we have to check it in the print function during runtime :(
                 Box::new(move |ec: &mut ExecutionContext| {
                     //println!("Stack frame on print: {:?}", ec.frame().let_bindings);
-                    let value_to_print = evaluate_printed_value(ec);
+                    let value_to_print =  ec.run_lambda_trampoline(&evaluate_printed_value);
                     println!("{}", value_to_print.to_string(ec));
                     return value_to_print
                 })
@@ -815,6 +820,7 @@ impl LambdaCompiler {
                         .into_iter()
                         .map(|arg| self.compile_internal(arg, funcs_params))
                         .collect::<Vec<_>>();
+
                     Box::new(move |ec: &mut ExecutionContext| {
                         //println!("Calling {called_name} {}", ec.frame().function);
                         let result = ec.eval_call(
