@@ -2,7 +2,7 @@
 
 use std::collections::{HashSet, BTreeMap};
 
-use crate::ast::{BinaryOp, Call};
+use crate::ast::BinaryOp;
 
 use crate::hir::{Expr, FuncDecl};
 
@@ -61,9 +61,7 @@ impl Value {
             Value::Str(StringPointer(s)) => {
                 ec.string_values[*s as usize].to_string()
             }
-            Value::IntTuple(l, r) => {
-                format!("({}, {})", l, r)
-            }
+            Value::IntTuple(l, r) => {     format!("({}, {})", l, r) }
             Value::Tuple(TuplePointer(t)) => {
                 let (f, s) = &ec.tuples[*t as usize];
                 let a = &ec.heap[f.0 as usize];
@@ -588,8 +586,8 @@ impl<'a> ExecutionContext<'a> {
         let f = evaluate_first(self);
         let s = evaluate_second(self);
         match (f, s) {
-            (Value::Int(a), Value::Int(b)) => Value::IntTuple(a, b),/* 
-            (Value::Bool(a), Value::Bool(b)) => Value::BoolTuple(a, b),
+           (Value::Int(a), Value::Int(b)) => Value::IntTuple(a, b),
+            /* (Value::Bool(a), Value::Bool(b)) => Value::BoolTuple(a, b),
             (Value::Int(a), Value::Bool(b)) => Value::IntBoolTuple(a, b),
             (Value::Bool(a), Value::Int(b)) => Value::BoolIntTuple(a, b),*/
             (a, b) => {
@@ -898,8 +896,8 @@ impl LambdaCompiler {
                             let (a, _) = &ec.tuples[ptr.0 as usize];
                             ec.heap[a.0 as usize].clone()
                         }
-                        Value::IntTuple(a, _) => Value::Int(a),/*
-                        Value::BoolTuple(a, _) => Value::Bool(a),
+                        Value::IntTuple(a, _) => Value::Int(a),
+                        /*Value::BoolTuple(a, _) => Value::Bool(a),
                         Value::BoolIntTuple(a, _) => Value::Bool(a),
                         Value::IntBoolTuple(a, _) => Value::Int(a),*/
                         _ => panic!("Type error: Cannot evaluate first on this value: {value:?}"),
@@ -915,7 +913,8 @@ impl LambdaCompiler {
                             let (_, b) = &ec.tuples[ptr.0 as usize];
                             ec.heap[b.0 as usize].clone()
                         }
-                        Value::IntTuple(_, a) => Value::Int(a),/*
+                        Value::IntTuple(_, a) => Value::Int(a),
+                        /*
                         Value::BoolTuple(_, a) => Value::Bool(a),
                         Value::BoolIntTuple(_, a) => Value::Int(a),
                         Value::IntBoolTuple(_, a) => Value::Bool(a),*/
