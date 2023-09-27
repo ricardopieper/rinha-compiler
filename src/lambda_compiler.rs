@@ -41,6 +41,7 @@ pub enum Value {
     Bool(bool),
     Str(StringPointer),
     Tuple(TuplePointer),
+    SmallTuple(i16, i16),
     Closure(ClosurePointer),
     Trampoline(ClosurePointer),
 }
@@ -54,15 +55,15 @@ impl Value {
             Value::Str(StringPointer(s)) => {
                 ec.string_values[*s as usize].to_string()
             }
-            //@TODO read from box storage
+       
             Value::Tuple(TuplePointer(t)) => {
                 let (f, s) = &ec.tuples[*t as usize];
                 let a = &ec.heap[f.0 as usize];
                 let b = &ec.heap[s.0 as usize];
                 format!("({}, {})", a.to_string(ec), b.to_string(ec))
             }
-          /*   Value::IntTuple(a, b) => format!("({}, {})", a.to_string(), b.to_string()),
-            Value::BoolTuple(a, b) => format!("({}, {})", a.to_string(), b.to_string()),
+            Value::SmallTuple(a, b) => format!("({}, {})", a.to_string(), b.to_string()),
+            /*Value::BoolTuple(a, b) => format!("({}, {})", a.to_string(), b.to_string()),
             Value::IntBoolTuple(a, b) => format!("({}, {})", a.to_string(), b.to_string()),
             Value::BoolIntTuple(a, b) => format!("({}, {})", a.to_string(), b.to_string()),*/
             Value::Closure(..) => "function".to_string(),
@@ -559,7 +560,27 @@ impl<'a> ExecutionContext<'a> {
         let f = evaluate_first(self);
         let s = evaluate_second(self);
         match (f, s) {
-          /*   (Value::Int(a), Value::Int(b)) => Value::IntTuple(a, b),
+            (Value::Int(a), Value::Int(b)) => {
+                //transform into i16 if in range
+                if a < i16::MAX as i32 && a > i16::MIN as i32 && b < i16::MAX as i32 && b > i16::MIN as i32 {
+                    Value::SmallTuple(a as i16, b as i16)
+                } else {
+                    let heap_a = self.heap.len();
+                    self.heap.push(Value::Int(a));
+                    let heap_b = self.heap.len();
+                    self.heap.push(Value::Int(b));
+
+                    let tuple_p = self.tuples.len();
+                    self.tuples.push( 
+                        (HeapPointer(heap_a as u32),
+                         HeapPointer(heap_b as u32)));
+
+                    Value::Tuple(
+                       TuplePointer(tuple_p as u32)
+                    )
+                }
+
+            }/*
             (Value::Bool(a), Value::Bool(b)) => Value::BoolTuple(a, b),
             (Value::Int(a), Value::Bool(b)) => Value::IntBoolTuple(a, b),
             (Value::Bool(a), Value::Int(b)) => Value::BoolIntTuple(a, b),*/
@@ -811,47 +832,19 @@ impl LambdaCompiler {
             }
             Expr::FuncCall {
                 func, args
-            } => match &*func {
-                Expr::Var {name} => {
-                    let called_name: &'static str = name.clone().leak();
-                    let function_name_index = self.intern_var_name(called_name);
-                    let evaluate_callee = self.compile_internal(*func, funcs_params);
-                    let arguments = args
-                        .into_iter()
-                        .map(|arg| self.compile_internal(arg, funcs_params))
-                        .collect::<Vec<_>>();
-
-                    Box::new(move |ec: &mut ExecutionContext| {
-                        //println!("Calling {called_name} {}", ec.frame().function);
-                        let result = ec.eval_call(
-                            &evaluate_callee,
-                            &arguments,
-                            Some(function_name_index),
-                            called_name,
-                        );
-                        //println!("Called {called_name} result = {result:?}");
-                        result
-                    })
-                }
-                other => {
-                    let called_name: &'static str = "anonymous function";
-                    let evaluate_callee = self.compile_internal(other.clone(), funcs_params);
-                    let arguments = args
-                        .into_iter()
-                        .map(|arg| self.compile_internal(arg, funcs_params))
-                        .collect::<Vec<_>>();
-                    Box::new(move |ec: &mut ExecutionContext| {
-                        //println!("Calling {called_name} {}", ec.frame().function);
-                        let result = ec.eval_call(
-                            &evaluate_callee,
-                            &arguments,
-                            None,
-                            called_name,
-                        );
-                        //println!("Called {called_name} result = {result:?}");
-                        result
-                    })
-                }
+            } => {
+                let (callee, arguments, name, called_name) = self.compile_call_data(&func, funcs_params, &args);
+                Box::new(move |ec: &mut ExecutionContext| {
+                    //println!("Calling {called_name} {}", ec.frame().function);
+                    let result = ec.eval_call(
+                        &callee,
+                        &arguments,
+                        name,
+                        called_name,
+                    );
+                    //println!("Called {called_name} result = {result:?}");
+                    result
+                })
             },
             fdecl @ Expr::FuncDecl(..) => {
                 //let it find the function params
@@ -895,7 +888,8 @@ impl LambdaCompiler {
                         Value::Tuple(ptr) => {
                             let (a, _) = &ec.tuples[ptr.0 as usize];
                             ec.heap[a.0 as usize].clone()
-                        }
+                        },
+                        Value::SmallTuple(a, _) => Value::Int(a as i32),
                         /*Value::IntTuple(a, _) => Value::Int(a),
                         Value::BoolTuple(a, _) => Value::Bool(a),
                         Value::BoolIntTuple(a, _) => Value::Bool(a),
@@ -912,7 +906,8 @@ impl LambdaCompiler {
                         Value::Tuple(ptr) => {
                             let (_, b) = &ec.tuples[ptr.0 as usize];
                             ec.heap[b.0 as usize].clone()
-                        }
+                        },
+                        Value::SmallTuple(_, a) => Value::Int(a as i32),
                         /*Value::IntTuple(_, a) => Value::Int(a),
                         Value::BoolTuple(_, a) => Value::Bool(a),
                         Value::BoolIntTuple(_, a) => Value::Int(a),
@@ -942,6 +937,33 @@ impl LambdaCompiler {
             lambda
         }*/
 
+    }
+
+    fn compile_call_data(&mut self, func: &Box<Expr>, funcs_params: &mut HashSet<String>, args: &[Expr]) -> (Box<dyn Fn(&mut ExecutionContext<'_>) -> Value>, Vec<Box<dyn Fn(&mut ExecutionContext<'_>) -> Value>>, Option<usize>, &'static str) {
+        let (callee, arguments, name, called_name) = match &**func {
+            Expr::Var {name} => {
+                let called_name: &'static str = name.clone().leak();
+                let function_name_index = self.intern_var_name(called_name);
+                let evaluate_callee = self.compile_internal(*func.clone(), funcs_params);
+                let arguments = args
+                    .into_iter()
+                    .map(|arg| self.compile_internal(arg.clone(), funcs_params))
+                    .collect::<Vec<_>>();
+                (evaluate_callee, arguments, Some(function_name_index), called_name)
+        
+            }
+            other => {
+                let called_name: &'static str = "anonymous function";
+                let evaluate_callee = self.compile_internal(other.clone(), funcs_params);
+                let arguments = args
+                    .into_iter()
+                    .map(|arg| self.compile_internal(arg.clone(), funcs_params))
+                    .collect::<Vec<_>>();
+       
+                (evaluate_callee, arguments, None, called_name)
+            }
+        };
+        (callee, arguments, name, called_name)
     }
 
     fn compile_function(&mut self, funcs_params: &mut HashSet<String>,  value: Expr, parameters: &[String], closure: &[String], tco: bool, trampoline_of: Option<usize>) -> LambdaFunction {
@@ -1081,6 +1103,7 @@ impl LambdaCompiler {
   
     fn compile_binexp_opt<'a>(
         &mut self,
+        funcs_params: &mut HashSet<String>,
         lhs: Box<Expr>,
         rhs: Box<Expr>,
         op: BinaryOp,
@@ -1262,6 +1285,28 @@ impl LambdaCompiler {
                 }
                 dispatch_bin_op!(variable_int_binop, op)
             }
+            //both sides are function calls, just trigger both
+            ( Expr::FuncCall {func: func_lhs, args:args_lhs }, Expr::FuncCall { func: func_rhs, args: args_rhs } ) => {
+                
+                let (callee_lhs, args_lhs, name_index_lhs, called_name_lhs) = self.compile_call_data(func_lhs, funcs_params, args_lhs);
+                let (callee_rhs, args_rhs, name_index_rhs, called_name_rhs) = self.compile_call_data(func_rhs, funcs_params, args_rhs);
+                 
+                macro_rules! call_both_sides {
+                    ($op:tt, $operation_name:ident) => {
+                        Box::new(move |ec: &mut ExecutionContext| {
+                            let call_lhs = ec.eval_call(&callee_lhs, &args_lhs, name_index_lhs, called_name_lhs);
+                            let call_lhs = ec.run_trampoline(call_lhs);
+    
+                            let call_rhs = ec.eval_call(&callee_rhs, &args_rhs, name_index_rhs, called_name_rhs);
+                            let call_rhs = ec.run_trampoline(call_rhs);
+                           
+                            $operation_name!(&call_lhs, &call_rhs, ec, $op)
+                        })
+                    }
+                }
+
+                dispatch_bin_op!(call_both_sides, op)
+            }
             //we could do constant folding here
             _ => return None
         };
@@ -1278,7 +1323,7 @@ impl LambdaCompiler {
     ) -> LambdaFunction {
 
         //tries to return an optimized version that does less eval_calls
-        let optimized = self.compile_binexp_opt(lhs.clone(), rhs.clone(), op.clone());
+        let optimized = self.compile_binexp_opt(funcs_params, lhs.clone(), rhs.clone(), op.clone());
         if let Some(opt) = optimized {
             return opt;
         }

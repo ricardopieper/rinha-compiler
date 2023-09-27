@@ -78,6 +78,8 @@ Closures are 8 bytes, and strings are 8 byte pointers.
 Same as off-enum values, they were moved into off-value storage inside ExecutionEngine. From 12 to 8 bytes.
 Down to 2.5ms from 2.9.
 
+It turns out a small Value really helps with general performance.
+
 9 - Frame reuse in TCO
 
 Finally addressed frame reutilization in TCO. Turns out this is just a flag on the stack frame.
@@ -87,5 +89,19 @@ Down to 2.2ms.
 
 During Off-enum closure work, we ended up creating an ever-expanding closure array that for every function call needed a new closure in this array.
 Turns out most of the time we need empty closures, so we preallocate them and ref them.
-
 No performance improvements, but some benchmarks now run without memory issues.
+
+
+11 - Small Tuple optimization
+
+For tuples with int values that fit into i16, we don't heap allocate them, instead I created a SmallTuple(i16, i16) variant.
+Down to 2.1ms.
+
+
+12 - BinExpr function call in both sides
+
+This optimization was done for const $op var, var $op const, and now it was done for call $op call. This makes it so one operation does more things in one go,
+rather than calling another LambdaFunction for each side.
+
+This had a small perf improvement for fib (2.7%) but nothing on perf.rinha.
+
