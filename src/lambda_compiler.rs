@@ -14,7 +14,7 @@ pub struct Stats {
     pub reused_frames: usize,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, PartialOrd, Ord)]
 pub struct Closure {
     pub callable_index: usize,
     pub closure_env_index: usize
@@ -34,11 +34,6 @@ pub struct ClosurePointer(u32);
 #[derive(Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
 pub struct TuplePointer(u32);
 
-#[derive(Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
-pub enum ClosureKind {
-    Empty { callable_index: u32 },
-    WithEnv(ClosurePointer)
-} 
 
 /// Enum for runtime values
 #[derive(Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
@@ -48,8 +43,8 @@ pub enum Value {
     Str(StringPointer),
     Tuple(TuplePointer),
     IntTuple(i32, i32),
-    Closure(ClosureKind),
-    Trampoline(ClosureKind),
+    Closure(ClosurePointer),
+    Trampoline(ClosurePointer),
 }
 
 
@@ -162,11 +157,16 @@ impl<'a> ExecutionContext<'a> {
         self.call_stack.push(frame);
     }
 
-    fn eval_closure_no_env(&mut self, index_of_new_function: u32) -> ClosureKind {
-        return ClosureKind::Empty { callable_index: index_of_new_function as u32 }
+    fn eval_closure_no_env(&mut self, index_of_new_function: u32) -> ClosurePointer {
+        let closure = Closure {
+            callable_index: index_of_new_function as usize, closure_env_index: usize::MAX
+        };
+        let closure_p = self.closures.len();
+        self.closures.push(closure);
+        return ClosurePointer(closure_p as u32);
     }
 
-    fn eval_closure_with_env(&mut self, index_of_new_function: u32) -> ClosureKind {
+    fn eval_closure_with_env(&mut self, index_of_new_function: u32) -> ClosurePointer {
 
         let function = self.functions.get(index_of_new_function as usize).unwrap();
         let closure = function.closure_indices;
@@ -189,7 +189,7 @@ impl<'a> ExecutionContext<'a> {
         };
         let closure_p = self.closures.len();
         self.closures.push(closure);
-        return ClosureKind::WithEnv(ClosurePointer(closure_p as u32));
+        return ClosurePointer(closure_p as u32);
 
     }
 
@@ -222,7 +222,7 @@ impl<'a> ExecutionContext<'a> {
 
     fn eval_var(&self, index: usize) -> Value {
         //@PERF no clone pls
-        //println!("Trying to get var {index} {varname}");
+        //println!("Trying to get var {index}");
         let var_stack = self.let_bindings.get(index);
         match var_stack {
             Some(value) => match value.last() {
@@ -269,8 +269,8 @@ impl<'a> ExecutionContext<'a> {
                     if let Some(s) = env.get(&index) {
                         s
                     } else {
-                        let var_name = &self.string_values[index];
-                        panic!("Variable {var_name} not found")
+                        //let var_name = &self.string_values[index];
+                        panic!("Variable {index} not found")
                     }
                 }
             }, //will only be cloned and heap allocated on complex structures
@@ -325,7 +325,7 @@ impl<'a> ExecutionContext<'a> {
         }
     }
 
-    pub fn get_callable_index(&self, kind: &ClosureKind) -> usize {
+    /*pub fn get_callable_index(&self, kind: &ClosureKind) -> usize {
         match kind {
             ClosureKind::Empty { callable_index } =>  *callable_index as usize,
             ClosureKind::WithEnv(ClosurePointer(p)) => {
@@ -333,7 +333,7 @@ impl<'a> ExecutionContext<'a> {
                 closure.callable_index
             }
         }
-    }
+    }*/
 
     fn eval_call(
         &mut self,
@@ -346,7 +346,7 @@ impl<'a> ExecutionContext<'a> {
         let Value::Closure(c) = callee_function else {
             panic!("Call to non-function value {called_name}")
         };
-        let callable_index = self.get_callable_index(&c);
+        let Closure { callable_index, .. } = self.closures[c.0 as usize];
         let callable = &self.functions[callable_index];
         if callable.parameters.len() != arguments.len() {
             panic!("Wrong number of arguments for function {called_name}")
@@ -387,17 +387,17 @@ impl<'a> ExecutionContext<'a> {
             }
             self.arg_eval_buffer.push(buf);
         } else {
-            self.make_new_frame(function_name_index, &c, arguments);
+            self.make_new_frame(function_name_index, c, arguments);
         }
         //Erase the lifetime of the function pointer. This is a hack, forgive me for I have sinned.
         //Let it wreck havoc on the interpreter state if it wants.
         let function: &LambdaFunction =
-            unsafe { std::mem::transmute(&self.functions[callable_index as usize].body) };
+            unsafe { std::mem::transmute(&self.functions[callable_index].body) };
         let function_result = function(self);
         //println!("Eval result: {function_result:?} caller: {}", self.frame().function);
         
-        if let Value::Trampoline(kind) = &function_result {
-            let trampoline_callee_index = self.get_callable_index(kind);
+        if let Value::Trampoline(p) = &function_result {
+            let Closure { callable_index: trampoline_callee_index, .. } = self.closures[p.0 as usize];
             let callee = &self.functions[trampoline_callee_index];
 
             if let Some(..) = callee.trampoline_of {
@@ -432,18 +432,14 @@ impl<'a> ExecutionContext<'a> {
         //even TCO'd functions have environments and they must be passed along somehow.
         //The tail function call might have referenced something other than the current function args...
         let mut tco_env_set = false;
-        while let Value::Trampoline(kind) = current {
-            let callee_index = self.get_callable_index(&kind);
-            let callee = &self.functions[callee_index];
+        while let Value::Trampoline(p) = current {
+            let Closure { callable_index, closure_env_index } = self.closures[p.0 as usize];
+            let callee = &self.functions[callable_index];
             
             if !tco_env_set {
-                self.frame_mut().tco_reuse_frame = true;
-               // println!("Pushed trampoline {:?}", cloned_trampoline);
-                if let ClosureKind::WithEnv(ClosurePointer(p)) = kind {
-                    let Closure {closure_env_index, .. } = self.closures[p as usize];
-                    self.frame_mut().closure_environment = closure_env_index as usize;
-
-                }
+                let frame = self.frame_mut();
+                frame.tco_reuse_frame = true;
+                frame.closure_environment = closure_env_index;
                 
                 //TCO hack: we modify the current stack instead of creating a new one because
                 //this is faster and TCO is already a huge hack.
@@ -505,49 +501,28 @@ impl<'a> ExecutionContext<'a> {
         self.reusable_frames.push(popped_frame);
     }
 
-    fn make_new_frame(&mut self, function_name_index: Option<usize>, kind: &ClosureKind, arguments: &[LambdaFunction]) {
+    fn make_new_frame(&mut self, function_name_index: Option<usize>, kind: ClosurePointer, arguments: &[LambdaFunction]) {
        // let (callable, index) = self.get_callable_ref(&kind);
+       let Closure { callable_index, closure_env_index } = self.closures[kind.0 as usize];
         let mut new_frame = match self.reusable_frames.pop() {
             Some(mut new_frame) => {
-                match kind {
-                    ClosureKind::Empty { callable_index } => {
-                        new_frame.function = *callable_index as usize;
-                        new_frame.closure_environment = usize::MAX;
-
-                    }
-                    ClosureKind::WithEnv(p) => {
-                        let closure = &self.closures[p.0 as usize];
-                        new_frame.function = closure.callable_index;
-                        new_frame.closure_environment = closure.closure_env_index;
-                    }
-                }
+                
+                new_frame.function = callable_index;
+                new_frame.closure_environment = closure_env_index;
+                    
+                
                 new_frame
             }
             None => {
-                match kind {
-                    ClosureKind::Empty { callable_index } => {
-                        StackFrame {
-                            function: *callable_index as usize,
-                            let_bindings_pushed: vec![],
-                            closure_environment: usize::MAX,
-                            tco_reuse_frame: false
-                        }
-                    }
-                    ClosureKind::WithEnv(p) => {
-                        let closure = &self.closures[p.0 as usize];
-                        StackFrame {
-                            function: closure.callable_index,
-                            let_bindings_pushed: vec![],
-                            closure_environment: closure.closure_env_index,
-                            tco_reuse_frame: false
-                        }
-                    }
+                StackFrame {
+                    function: callable_index,
+                    let_bindings_pushed: vec![],
+                    closure_environment: closure_env_index,
+                    tco_reuse_frame: false
                 }
-              
             }
         };
 
-        let callable_index = self.get_callable_index(&kind);
         let callable = &self.functions[callable_index];
         //In this new stack frame, we push the function name, so we can do recursion.
         //To comply with the rest of the interpreter logic we also push the function name into the let bindings
