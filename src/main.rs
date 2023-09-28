@@ -10,6 +10,7 @@ use clap::ValueEnum;
 use lalrpop_util::lalrpop_mod;
 use miette::IntoDiagnostic;
 use owo_colors::OwoColorize;
+use serde::Deserialize;
 use crate::ast::File;
 
 // The lalrpop module, it does generate the parser and lexer
@@ -98,8 +99,13 @@ fn program() -> miette::Result<()> {
     if command.mode == Mode::Rinha {
 
         //deserialize into file
+        let mut deserializer = serde_json::Deserializer::from_str(&file);
+        deserializer.disable_recursion_limit();
+        let deserializer = serde_stacker::Deserializer::new(&mut deserializer);
+        
+        let file: File = File::deserialize(deserializer).unwrap();
+        
 
-        let file: File = serde_json::from_str(&file).into_diagnostic()?;
         let compiler = lambda_compiler::LambdaCompiler::new();
         let hir = hir::ast_to_hir(file.expression);
         let program = compiler.compile(hir);

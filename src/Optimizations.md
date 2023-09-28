@@ -104,4 +104,3 @@ This optimization was done for const $op var, var $op const, and now it was done
 rather than calling another LambdaFunction for each side.
 
 This had a small perf improvement for fib (2.7%) but nothing on perf.rinha.
-

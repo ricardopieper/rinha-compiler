@@ -204,7 +204,6 @@ impl<'a> ExecutionContext<'a> {
     fn eval_let(
         &mut self,
         evaluate_value: &LambdaFunction,
-        evaluate_next: &LambdaFunction,
         var_index: usize,
     ) -> Value {
         let bound_value = self.run_lambda_trampoline(evaluate_value);
@@ -217,9 +216,7 @@ impl<'a> ExecutionContext<'a> {
             frame_bindings.push(bound_value);
             self.frame_mut().let_bindings_pushed.push(var_index);
         }
-        //Does not run trampoline because it could be the last statement in the function, which would cause recursion
-        let next = evaluate_next(self);
-        return next;
+        return bound_value;
     }
 
     fn eval_var(&self, index: usize) -> Value {
@@ -668,86 +665,100 @@ impl LambdaCompiler {
 
     //whenever a function is constructed, it captures the environment. This is a closure.
     //also don't closure over let bindings
-    fn get_closure(&mut self, expr: &Expr, params: &mut HashSet<String>, current_fn_let_bindings: &mut HashSet<String>) -> HashSet<String> {
-        let empty = HashSet::new();
-        match expr {
-            Expr::Let { value, next, name } =>{
-                current_fn_let_bindings.insert(name.to_string());
-                let mut value_closure = self.get_closure(value, params, current_fn_let_bindings);
-                value_closure.extend(self.get_closure(next, params, current_fn_let_bindings));
-                return value_closure;
-            }
-            Expr::Var { name } => {
-                if params.contains(name) || current_fn_let_bindings.contains(name) {
-                    return empty;
-                } else {
-                    return HashSet::from_iter(vec![name.to_string()].into_iter());
-                }
-            }
-            Expr::Int {..} => empty,
-            Expr::Bool {..} => empty,
-            Expr::String {..} => empty,
-            Expr::If { cond, then, otherwise } =>{
-                let mut cond_closure = self.get_closure(cond, params, current_fn_let_bindings);
-                let then_closure = self.get_closure(then, params, current_fn_let_bindings);
-                let otherwise_closure = self.get_closure(otherwise, params, current_fn_let_bindings);
-                cond_closure.extend(then_closure);
-                cond_closure.extend(otherwise_closure);
-                cond_closure
-            }
-            Expr::Tuple { first, second } => {
-                let mut first_closure = self.get_closure(first, params, current_fn_let_bindings);
-                let second_closure = self.get_closure(second, params, current_fn_let_bindings);
-                first_closure.extend(second_closure);
 
-                first_closure
-            }
-            Expr::First { value } => {
-                self.get_closure(value, params, current_fn_let_bindings)
-            }
-            Expr::Second { value } => {
-                self.get_closure(value, params, current_fn_let_bindings)
-            }
-            Expr::Print { value } => {
-                self.get_closure(value, params, current_fn_let_bindings)
-            }
-            Expr::FuncDecl(FuncDecl { is_tco_trampoline, .. }) if *is_tco_trampoline => {
-              
-               //this may be an extreme oversimplification, but tco trampolines don't close over anything
-               //they actually do but for them we can probably get away with it
-               empty 
-            }
-            Expr::FuncDecl(FuncDecl { params: func_params, body, .. }) => {
-                //the analysis of regular funcdecls, not trampolines, is done by analyzing it in isolation, 
-                //does not matter the context it is in.
-                //but in the case of a TCO trampoline, we detect the variables in params that were used in the call, and don't closure over them again
-                //we do this by extending the current params and passing along the chain
-                //the funcdecl itself has 0 parameters
-                //thi is an optimization, ```trampolines are generated in a very controlled way
-                let mut new_function_params = HashSet::new();
-                for p in func_params {
-                    new_function_params.insert(p.clone());
+    
+    fn get_closure(&mut self, body: &[&Expr], params: &mut HashSet<String>, current_fn_let_bindings: &mut HashSet<String>) -> HashSet<String> {
+        let mut closure = HashSet::new();
+        for expr in body {
+            match expr {
+                Expr::Let { value, name } =>{
+                    current_fn_let_bindings.insert(name.to_string());
+                    let value_closure = self.get_closure(&[value], params, current_fn_let_bindings);
+                    closure.extend(value_closure);
                 }
-                let mut new_let_bindings = HashSet::new();
-                self.get_closure(body, &mut new_function_params, &mut new_let_bindings)
-            }
-            Expr::FuncCall { func, args } => {
-                let mut f_closure = HashSet::new();
-
-                f_closure.extend(self.get_closure(func, params, current_fn_let_bindings));
-
-                for a in args {
-                    f_closure.extend(self.get_closure(a, params, current_fn_let_bindings));
+                Expr::Var { name } => {
+                    if !(params.contains(name) || current_fn_let_bindings.contains(name)) {
+                        closure.extend(vec![name.to_string()].into_iter());
+                    }
                 }
-                f_closure
-            }
-            Expr::BinOp { left, right, .. } => {
-                let mut lhs_closure = self.get_closure(left, params, current_fn_let_bindings);
-                let rhs_closure = self.get_closure(right, params, current_fn_let_bindings);
-                lhs_closure.extend(rhs_closure);
-                lhs_closure
+                Expr::If { cond, then, otherwise } =>{
+                    let mut cond_closure = self.get_closure(&[cond], params, current_fn_let_bindings);
+                    let then_closure = self.get_closure(&as_ref_slice(then), params, current_fn_let_bindings);
+                    let otherwise_closure = self.get_closure(&as_ref_slice(otherwise), params, current_fn_let_bindings);
+                    cond_closure.extend(then_closure);
+                    cond_closure.extend(otherwise_closure);
+                    closure.extend(cond_closure)
+                }
+                Expr::Tuple { first, second } => {
+                    let mut first_closure = self.get_closure(&[first], params, current_fn_let_bindings);
+                    let second_closure = self.get_closure(&[second], params, current_fn_let_bindings);
+                    first_closure.extend(second_closure);
+
+                    closure.extend(first_closure)
+                }
+                Expr::First { value } => {
+                    closure.extend(self.get_closure(&[value], params, current_fn_let_bindings))
+                }
+                Expr::Second { value } => {
+                    closure.extend(self.get_closure(&[value], params, current_fn_let_bindings))
+                }
+                Expr::Print { value } => {
+                    closure.extend(self.get_closure(&[value], params, current_fn_let_bindings))
+                }
+                Expr::FuncDecl(FuncDecl { is_tco_trampoline, .. }) if *is_tco_trampoline => {
+                
+                    //this may be an extreme oversimplification, but tco trampolines don't close over anything
+                    //they actually do but for them we can probably get away with it
+                  
+                }
+                Expr::FuncDecl(FuncDecl { params: func_params, body, .. }) => {
+                    //the analysis of regular funcdecls, not trampolines, is done by analyzing it in isolation, 
+                    //does not matter the context it is in.
+                    //but in the case of a TCO trampoline, we detect the variables in params that were used in the call, and don't closure over them again
+                    //we do this by extending the current params and passing along the chain
+                    //the funcdecl itself has 0 parameters
+                    //thi is an optimization, ```trampolines are generated in a very controlled way
+                    let mut new_function_params = HashSet::new();
+                    for p in func_params {
+                        new_function_params.insert(p.clone());
+                    }
+                    let mut new_let_bindings = HashSet::new();
+                    closure.extend(self.get_closure(&as_ref_slice(&body), &mut new_function_params, &mut new_let_bindings))
+                }
+                Expr::FuncCall { func, args } => {
+                    let mut f_closure = HashSet::new();
+
+                    f_closure.extend(self.get_closure(&[func], params, current_fn_let_bindings));
+
+                    for a in args {
+                        f_closure.extend(self.get_closure(&[a], params, current_fn_let_bindings));
+                    }
+                    closure.extend(f_closure)
+                }
+                Expr::BinOp { left, right, .. } => {
+                    let mut lhs_closure = self.get_closure(&[left], params, current_fn_let_bindings);
+                    let rhs_closure = self.get_closure(&[right], params, current_fn_let_bindings);
+                    lhs_closure.extend(rhs_closure);
+                    closure.extend(lhs_closure)
+                }
+                _ => {}
             }
         }
+        closure
+    }
+
+    fn compile_body(&mut self, body: &[Expr], funcs_params: &mut HashSet<String>) -> LambdaFunction {
+        let mut lambdas = vec![];
+        for ast in body {
+            lambdas.push(self.compile_internal(ast.clone(), funcs_params));
+        }
+        Box::new(move |ec: &mut ExecutionContext| {
+            let mut result = None;
+            for lambda in lambdas.iter() {
+                result = Some(lambda(ec));
+            }
+            result.unwrap()
+        })
     }
 
     fn compile_internal(&mut self, ast: Expr, funcs_params: &mut HashSet<String>) -> LambdaFunction {
@@ -773,7 +784,7 @@ impl LambdaCompiler {
             Expr::Let{
                 name,
                 value,
-                next
+               // next
             } => {
 
                 if let Expr::FuncDecl(FuncDecl { params, body, ..  }) = &*value && name != "_" && self.is_tail_recursive(&body, &name) {
@@ -784,28 +795,25 @@ impl LambdaCompiler {
                         all_function_params.insert(p.to_string());
                     }
                     let mut let_bindings = HashSet::new();
-                    let closure = self.get_closure(&trampolined_function, &mut all_function_params, &mut let_bindings);
+                    let closure = self.get_closure(&as_ref_slice(&trampolined_function), &mut all_function_params, &mut let_bindings);
                     let closure_set: Vec<_> = closure.into_iter().collect();
     
                     //println!("Function got TCO'd {trampolined_function:#?}");
                     let evaluate_value = self.compile_function(funcs_params, trampolined_function, params, &closure_set, true, None);
-                    let evaluate_next = self.compile_internal(*next, funcs_params);
+
                     let var_name_leaked: &'static str = name.leak();
                     let var_index = self.intern_var_name(var_name_leaked);
                     Box::new(move |ec: &mut ExecutionContext| {
                         //println!("Evaluating Let {var_name_leaked} TCO");
-                        ec.eval_let(&evaluate_value, &evaluate_next, var_index)
+                        ec.eval_let(&evaluate_value, var_index)
                     })
                     
                 }
                 else {
                     let evaluate_value = self.compile_internal(*value, funcs_params);
-                    let evaluate_next = self.compile_internal(*next, funcs_params);
                     if name == "_" {
                         Box::new(move |ec: &mut ExecutionContext| {
-                            evaluate_value(ec);
-                            let next = evaluate_next(ec);
-                            return next;
+                            ec.run_lambda_trampoline(&evaluate_value)
                         })
                     } else {
                         let var_name_leaked: &'static str = name.leak();
@@ -813,7 +821,7 @@ impl LambdaCompiler {
                         Box::new(move |ec: &mut ExecutionContext| {
                             //println!("Evaluating Let {var_name_leaked} non-tco");
                             //continuation into recursive call in next
-                            ec.eval_let(&evaluate_value, &evaluate_next, var_index)
+                            ec.eval_let(&evaluate_value, var_index)
                         })
                     }
                 }
@@ -849,7 +857,7 @@ impl LambdaCompiler {
                 //let it find the function params
                 let mut all_function_params = funcs_params.clone();
                 let mut let_bindings = HashSet::new();
-                let closure = self.get_closure(&fdecl.clone(), &mut all_function_params, &mut let_bindings);
+                let closure = self.get_closure(&[&fdecl], &mut all_function_params, &mut let_bindings);
                 let Expr::FuncDecl(FuncDecl {
                     params, body, is_tco_trampoline,
                 }) = fdecl else {
@@ -863,7 +871,7 @@ impl LambdaCompiler {
                 } else {
                     None
                 };
-                self.compile_function(funcs_params, *body, &params, &closure_set, false, trampoline)
+                self.compile_function(funcs_params, body, &params, &closure_set, false, trampoline)
             }
             Expr::If {
                 cond,
@@ -872,8 +880,8 @@ impl LambdaCompiler {
                 ..
             } => {
                 let evaluate_condition = self.compile_internal(*cond, funcs_params);
-                let evaluate_then = self.compile_internal(*then, funcs_params);
-                let evaluate_otherwise = self.compile_internal(*otherwise, funcs_params);
+                let evaluate_then = self.compile_body(&then, funcs_params);
+                let evaluate_otherwise = self.compile_body(&otherwise, funcs_params);
                 Box::new(move |ec: &mut ExecutionContext| {
                     ec.eval_if(&evaluate_condition, &evaluate_then, &evaluate_otherwise)
                 })
@@ -965,7 +973,7 @@ impl LambdaCompiler {
         (callee, arguments, name, called_name)
     }
 
-    fn compile_function(&mut self, funcs_params: &mut HashSet<String>,  value: Expr, parameters: &[String], closure: &[String], tco: bool, trampoline_of: Option<usize>) -> LambdaFunction {
+    fn compile_function(&mut self, funcs_params: &mut HashSet<String>,  body: Vec<Expr>, parameters: &[String], closure: &[String], tco: bool, trampoline_of: Option<usize>) -> LambdaFunction {
         //Functions are compiled and stored into a big vector of functions, each one has a unique ID.
         //value will be the call itself, we're compiling the body of the tco trampoline
         //println!("Compile function: {value:#?} location: {location:?}");
@@ -985,7 +993,22 @@ impl LambdaCompiler {
             new_params.insert(param.to_string());
         }
         //this will return the lambda for the call to iter
-        let new_function = self.compile_internal(value, &mut new_params);
+        //let new_function = self.compile_internal(value, &mut new_params);
+
+        let body_lambdas: Vec<LambdaFunction> = body
+            .into_iter()
+            .map(|expr| self.compile_internal(expr, &mut new_params))
+            .collect::<Vec<_>>();
+
+        let new_function: LambdaFunction = Box::new(move |ec: &mut ExecutionContext| {
+            let mut last = None;
+            for l in body_lambdas.iter() {
+                let result = &l;
+                last = Some(result(ec));
+            }
+            last.unwrap()
+        });
+
 
         let parameters = parameters
             .into_iter()
@@ -1042,55 +1065,76 @@ impl LambdaCompiler {
     }
 
     //only call when is_tail_recursive is true
-    fn into_tco(&mut self, value: &Expr, fname: &str) -> Expr {
-        match value {
-            Expr::Let{ name, value, next } => {
-                Expr::Let { name: name.clone(), value: value.clone(), next: self.into_tco(next, fname).into() }
-            }
-            Expr::If { cond, then, otherwise } => {
-                Expr::If { cond: cond.clone(), then: self.into_tco(then, fname).into(), otherwise: self.into_tco(&otherwise, fname).into() }
-            },
-            call @ Expr::FuncCall { func, .. } => {
-                match &**func {
-                    Expr::Var{ name, .. } if name == fname => { 
-                        Expr::FuncDecl(FuncDecl {
-                            params: vec![],
-                            body: call.clone().into(), 
-                            is_tco_trampoline: true
-                        }) // fn() => iter(from+1, ...)
-                    },
-                    _ =>call.clone()
+    fn into_tco(&mut self, body: &[Expr], fname: &str) -> Vec<Expr> {
+
+        let mut new_body = vec![];
+        for value in body {
+            match value {
+                
+                Expr::If { cond, then, otherwise } => {
+                    let new_if = Expr::If { cond: cond.clone(), then: self.into_tco(then, fname).into(), otherwise: self.into_tco(&otherwise, fname).into() };
+                    new_body.push(new_if);
+                },
+                call @ Expr::FuncCall { func, .. } => {
+                    match &**func {
+                        Expr::Var{ name, .. } if name == fname => { 
+                            let fdecl = Expr::FuncDecl(FuncDecl {
+                                params: vec![],
+                                body: vec![call.clone().into()], 
+                                is_tco_trampoline: true
+                            });
+                            new_body.push(fdecl);
+                        },
+                        t => {
+                            new_body.push(t.clone())
+                        }
+                    }
+                }
+                t => {
+                    new_body.push(t.clone());
                 }
             }
-            t => t.clone() 
         }
+        new_body
     }
 
-    pub fn is_tail_recursive(&mut self, value: &Expr, fname: &str) -> bool {
+    pub fn is_tail_recursive(&mut self, body: &[Expr], fname: &str) -> bool {
         //println!("Checking if is tail recursive: {fname} \n${value:#?}");
-        match value {
-            Expr::FuncCall { func, .. } => {
-                match &**func {
-                    Expr::Var{ name, .. } if name == fname => true,
-                    _ => false
+        for value in body {
+            match value {
+                Expr::FuncCall { func, .. } => {
+                    match &**func {
+                        Expr::Var{ name, .. } if name == fname => return true,
+                        _ => { }
+                    }
                 }
+               
+                Expr::If { then, otherwise, .. } => {
+                    let is_tailrec = self.is_tail_recursive(then, fname) || self.is_tail_recursive(otherwise, fname);
+                    if is_tailrec {
+                        return true
+                    }
+                }
+                _ => { }
             }
-            Expr::Let{ next, .. } => {
-                self.is_tail_recursive(next, fname)
-            }
-            Expr::If { then, otherwise, .. } => {
-                self.is_tail_recursive(then, fname) || self.is_tail_recursive(otherwise, fname)
-            }
-            _ => false
         }
+        false
     }
 
-    pub fn compile(mut self, ast: Expr) -> CompilationResult {
+    pub fn compile(mut self, ast: Vec<Expr>) -> CompilationResult {
         let mut params = HashSet::new();
-        let main = self.compile_internal(ast, &mut params);
+        let lambdas: Vec<LambdaFunction> = ast
+            .into_iter()
+            .map(|expr| self.compile_internal(expr, &mut params))
+            .collect::<Vec<_>>();
         //trampolinize the returned value
-        let trampolinized = Box::new(move |ec: &mut ExecutionContext| {
-            ec.run_lambda_trampoline(&main)
+        let trampolinized: LambdaFunction = Box::new(move |ec: &mut ExecutionContext| {
+            let mut last = None;
+            for l in lambdas.iter() {
+                let result = l(ec);
+                last = Some(result);
+            }
+            ec.run_trampoline(last.unwrap())
         });
         CompilationResult {
             main: trampolinized,
@@ -1414,4 +1458,8 @@ impl LambdaCompiler {
             }),
         }
     }
+}
+
+fn as_ref_slice(v: &[Expr]) -> Vec<&Expr> {
+    v.iter().collect()
 }
