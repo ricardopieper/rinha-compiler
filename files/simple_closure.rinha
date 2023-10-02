@@ -1,0 +1,12 @@
+let y = 100;
+let x = fn (some_value) => {
+    fn() => {
+        some_value
+    }
+};
+let f1 = x(1);
+let f2 = x(2);
+let f3 = x(3);
+let f4 = x(4);
+
+print("Result = " + f4())

@@ -19,7 +19,7 @@
                     "kind": "bin"
                 }
             },
-            "args": ["--mode=rinha", "test.rinha.json"],
+            "args": ["--mode=interpreter", "./files/perf.rinha"],
             "cwd": "${workspaceFolder}"
         },
         {

@@ -1,0 +1,193 @@
+let ValErr = "val_err";
+let ValInt = "val_int";
+let ValFunc = "val_func";
+let ValLazy = "val_lazy";
+
+let empty_env = fn(v) => {
+    (ValErr, "undefined variable " + v)
+};
+
+let bind = fn(var, val, env) => {
+    fn(v) => {
+        if (var == v) {
+            val
+        } else {
+            env(v)
+        }
+    }
+};
+
+let sum = fn(lhs, rhs) => {
+    lhs + rhs
+};
+
+let sub = fn(lhs, rhs) => {
+    lhs - rhs
+};
+
+let mul = fn(lhs, rhs) => {
+    lhs * rhs
+};
+
+let div = fn(lhs, rhs) => {
+    lhs / rhs
+};
+
+let bin_op = fn(op, lhs, rhs) => {
+    let lt = first(lhs);
+    let rt = first(rhs);
+    if ((lt == ValInt) && (rt == ValInt)) {
+        (ValInt, op(second(lhs), second(rhs)))
+    } else {
+        (ValErr, "binary operand is not a number")
+    }
+};
+
+
+
+let ExpK = "ExpK"; // Integer
+let ExpVar = "ExpVar"; // Var
+let ExpAdd = "ExpAdd"; // Exp Exp
+let ExpSub = "ExpSub"; // Exp Exp
+let ExpMul = "ExpMul"; // Exp Exp
+let ExpDiv = "ExpDiv"; // Exp Exp
+let ExpIf = "ExpIf"; //Exp Exp Exp
+let ExpApp = "ExpApp"; // Exp Exp
+let ExpLambda = "ExpLambda"; // Var Exp
+let ExpLet =  "ExpLet"; // Var Exp Exp
+
+let eval = fn(exp, env) => {
+    let kind = first(exp);
+    let data = second(exp);
+    
+    if (kind == ExpK) {
+        (ValInt, data)
+    } else {
+
+    if (kind == ExpVar) {
+        // second(env(data))()
+        //env(data)
+        let x = env(data);
+        if (first(x) == ValLazy) {
+            second(x)()
+        } else {
+            x
+        }
+    } else {
+
+    if (kind == ExpAdd) {
+        let lhs = eval(first(data), env);
+        let rhs = eval(second(data), env);
+        bin_op(sum, lhs, rhs)
+    } else {
+
+    if (kind == ExpSub) {
+        let lhs = eval(first(data), env);
+        let rhs = eval(second(data), env);
+        bin_op(sub, lhs, rhs)
+    } else {
+
+    if (kind == ExpMul) {
+        let lhs = eval(first(data), env);
+        let rhs = eval(second(data), env);
+        bin_op(mul, lhs, rhs)
+    } else {
+
+    if (kind == ExpDiv) {
+        let lhs = eval(first(data), env);
+        let rhs = eval(second(data), env);
+        bin_op(div, lhs, rhs)
+    } else {
+
+    if (kind == ExpIf) {
+        let cond = first(data);
+        let blocks = second(data);
+        let then = first(blocks);
+        let otherwise = second(blocks);
+        let econd = eval(cond, env);
+        if (first(econd) == ValInt) {
+            if (second(econd) != 0) {
+                eval(then, env)
+            } else {
+                eval(otherwise, env)
+            }
+        } else {
+            (ValErr, "condition not an integer")
+        }
+
+    } else {
+
+    if (kind == ExpApp) {
+        let val_func = eval(first(data), env);
+        if (first(val_func) == ValFunc) {
+            let f = second(val_func);
+            let param = first(f);
+            let body = first(second(f));
+            let arg = eval(second(data), env);
+            let env2 = bind(param, arg, second(second(f)));
+            eval(body, env2)
+        }
+        else {
+            (ValErr, "calling a non-function value")
+        }
+    } else {
+
+    if (kind == ExpLambda) {
+        let param = first(data);
+        let body = second(data);
+        (ValFunc, (param, (body, env)))
+    } else {
+
+    // ExpLet
+    let var = first(data);
+    let value = first(second(data));
+
+    let rec = fn() => {
+        let rec_env = bind(var, (ValLazy, rec), env);
+        eval(value, rec_env)
+    };
+
+    let env2 = bind(var, (ValLazy, rec), env);
+    let evalue = eval(value, env2);
+    let env3 = bind(var, evalue, env);
+
+    let next = second(second(data));
+    eval(next, env3)
+
+    }}}}}}}}}
+
+};
+
+let fac =
+  (ExpLet, ("f", (
+    (ExpLambda, ("x",
+       (ExpIf, ((ExpVar, "x"),
+              ((ExpMul, ((ExpVar, "x"),
+                      (ExpApp, ((ExpVar, "f"), (ExpSub, ((ExpVar, "x"), (ExpK, 1))))))),
+              (ExpK, 1)))))),
+    (ExpApp, ((ExpVar, "f"), (ExpK, 10))))));
+
+
+let _ = print("factorial 10: " + second(eval(fac, empty_env)));
+
+let fib =
+  (ExpLet, ("f", (
+    (ExpLambda, ("x",
+
+       (ExpIf, (
+           (ExpVar, "x"),
+
+           ((ExpIf, ((ExpSub, ((ExpVar, "x"), (ExpK, 1))),
+                  ((ExpAdd, ((ExpApp, ((ExpVar, "f"), (ExpSub, ((ExpVar, "x"), (ExpK, 1))))),
+                          (ExpApp, ((ExpVar, "f"), (ExpSub, ((ExpVar, "x"), (ExpK, 2))))))),
+                  (ExpVar, "x")))),
+
+       (ExpVar, "x"))))
+
+       )),
+    (ExpApp, ((ExpVar, "f"), (ExpK, 10))))));
+
+
+let _ = print("fib 10: " + second(eval(fib, empty_env)));
+
+print("OK")

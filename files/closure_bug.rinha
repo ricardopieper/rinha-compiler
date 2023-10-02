@@ -1,0 +1,22 @@
+let empty_env = fn(v) => {
+    (ValErr, "undefined variable " + v)
+};
+
+let bind = fn(var, val, env) => {
+    let _ = print("bind call");
+    fn(v) => {
+        let _ = print("env call with " + v + " and var " + var);
+
+        if (var == v) {
+            val
+        } else {
+            env(v)
+        }
+    }
+};
+
+let env = bind("z", 1, empty_env);
+let env = bind("x", 2, env);
+
+let v = env("z");
+print(v)
