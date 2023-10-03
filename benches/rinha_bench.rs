@@ -33,10 +33,10 @@ let work = fn(x) => {
     f * s
   };
 
-  iter(0, 200, work_closure, 0)
+  iter(0, 500, work_closure, 0)
 };
 
-iter(0, 100, work, 0)
+iter(0, 500, work, 0)
 ";
 
 

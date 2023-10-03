@@ -104,34 +104,3 @@ This optimization was done for const $op var, var $op const, and now it was done
 rather than calling another LambdaFunction for each side.
 
 This had a small perf improvement for fib (2.7%) but nothing on perf.rinha.
-
-13 - Closure fix
-
-Turns out I had a closure problem where values were being loaded from the let bindings, but if that value had been overwritten by another function,
-then the closure would load this new value instead of the value the closure was created with.
-
-This had a massive negative impact on performance. With optimizations, we're back into 3.4ms territory.
-
-14 - Minimal function closure
-
-We are copying too much data into the closure. This is going beyond the smallvec's limit of 4 values.
-for perf.rinha, there is a function doing 6 value copies, this needs to be fixed.
-
-Once fixed we are back to 2.3ms, for some reason some recent changes (including ones to avoid deep recursion in the compiler itself)
-made the fib benchmark 10% slower :(
-
-
-15 - The actual stack
-
-Since we support shadowing and it's all untyped, and every value has the same size (8 bytes), we could try to simulate an actual call stack,
-in every call we allocate N bytes in the stack dynamically using DynStack (or, for now, just good old vecs). 
-
-This could help saving time popping the values from the stack, which currently I think is a slow O(n) operation where N = number of variables.
-
-For every callable we will store the function layout, which is a table containing the variable ID and its position
-When we compile it, we just read the stack section and interpret it as a value.
-
-When we call a function, we evaluate the arguments and copy it into their respective positions for the called function.
-For closures, we kind of already do this. We build a closure and copy them onto the closure data.
-
-For TCO, we will be reusing the frame, so in those cases it should be a big win.

@@ -1,8 +1,6 @@
 
 
-use std::collections::{HashSet, BTreeSet};
-
-use smallvec::SmallVec;
+use std::collections::{HashSet, BTreeMap};
 
 use crate::ast::BinaryOp;
 
@@ -46,7 +44,6 @@ pub enum Value {
     SmallTuple(i16, i16),
     Closure(ClosurePointer),
     Trampoline(ClosurePointer),
-    None
 }
 
 
@@ -72,14 +69,12 @@ impl Value {
             //Value::Error(e) => format!("error: {}", e),
            // Value::Unit => "unit".to_string(),
             Value::Bool(b) => b.to_string(),
-            Value::None => "None".to_string()
         }
     }
 }
 
 pub struct StackFrame {
     function: usize,
-    pub stack_index: usize,
     pub let_bindings_pushed: Vec<usize>,
     pub closure_environment: usize,
     pub tco_reuse_frame: bool
@@ -90,19 +85,9 @@ pub struct Callable {
     pub closure_indices: &'static [usize],
     pub body: LambdaFunction,
     //pub location: Location,
+    pub tco_optimized: bool,
     pub trampoline_of: Option<usize>, //the callable index this callable belongs to,
    
-}
-
-//used in compile_internal to track the state of the function being compiled
-#[derive(Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
-struct FunctionData {
-    name: Option<String>,
-    let_bindings_so_far: BTreeSet<String>,
-    parameters: BTreeSet<String>,
-    closure: BTreeSet<String>,
-    trampoline_of: Option<usize>
-    //other things are considered closure ;)
 }
 
 pub struct ExecutionContext<'a> {
@@ -114,7 +99,7 @@ pub struct ExecutionContext<'a> {
     pub let_bindings: Vec<Vec<Value>>,
     pub arg_eval_buffer: Vec<Vec<Value>>,
     pub reusable_frames: Vec<StackFrame>,
-    pub closure_environments: Vec<SmallVec::<[Value; 4]>>,
+    pub closure_environments: Vec<BTreeMap<usize, Value>>,
     pub string_values: Vec<String>,
     //most things are done in the "stack" for some definition of stack which is very loose here....
     //this heap is for things like dynamic tuples that could very well be infinite.
@@ -131,21 +116,6 @@ pub struct CompilationResult {
     pub functions: Vec<Callable>,
 }
 
-#[derive(Eq, PartialEq)]
-//Enum used to detect when a function is tail recursive. This is not a property of the function,
-//but rather a property of a particular expression. A function is tail recursive if we recurse/iterate over the AST
-//and find that all expressions are tail recursive or not recursive (base cases)
-enum TailRecursivity {
-    //The last expression is a call to the same function, this is an intermediate result until the whole function is evaluated
-    TailRecursive,
-    //No self function call found, maybe it's a base case? This is an intermediate result until the whole function is evaluated.
-    NotSelfRecursive,
-    //It cannot be a tail recursive function... not even necessarily recursive.
-    //if the last expression is a binary operation, then it's guaranteed to not be tail recursive.
-    //This is a final result. Once we detect a non tail recursive situation we can stop analyzing the function.
-    NotTailRecursive
-}
-
 impl<'a> ExecutionContext<'a> {
     pub fn new(program: &'a CompilationResult) -> Self {
 
@@ -158,12 +128,9 @@ impl<'a> ExecutionContext<'a> {
             closures
         };
 
-        let let_bindings = program.strings.iter().map(|s| vec![] ).collect();
-
         Self {
             call_stack: vec![StackFrame {
                 function: usize::MAX,
-                stack_index: 0,
                 let_bindings_pushed: vec![],
                 closure_environment: usize::MAX,
                 tco_reuse_frame: false
@@ -171,11 +138,11 @@ impl<'a> ExecutionContext<'a> {
             arg_eval_buffer: vec![],
             functions: &program.functions,
             enable_memoization: true,
-            let_bindings: let_bindings,
+            let_bindings: vec![vec![]; program.strings.len()],
             reusable_frames: vec![],
             closure_environments: vec![],
             heap: vec![],
-            string_values: program.strings.clone(),
+            string_values: vec![],
             tuples: vec![],
             closures: empty_closures
             
@@ -208,25 +175,18 @@ impl<'a> ExecutionContext<'a> {
         let function = self.functions.get(index_of_new_function).unwrap();
         let closure = function.closure_indices;
 
-        //we will copy the values into the closure, but the access to the value will require looking into the function's closure indices.
-        //If we have 20 variable names in the program but the closure only requires one, we copy that one value into index 0,
-        //then during compilation we need to relate the variable index to the closure index 
-
-        //start copy of values into environment
-        //let mut environment = BTreeMap::new();
-        //println!("Creating closure with env, closure vars: {}", closure.len());
-        let mut vec = SmallVec::<[Value; 4]>::new();
+       //start copy of values into environment
+        let mut environment = BTreeMap::new();
         for idx in closure {
             if let Some(v)  = self.let_bindings.get(*idx).unwrap().last() {
-                vec.push(*v)
-            } else {
-                vec.push(Value::None)
+                environment.insert(*idx, 
+                    *v
+                );
             }
         }
-       
         //println!("{:#?}", environment);
         let current_id = self.closure_environments.len();
-        self.closure_environments.push(vec);
+        self.closure_environments.push(environment);
  
         let closure = Closure {
             callable_index: index_of_new_function, closure_env_index: current_id
@@ -245,7 +205,6 @@ impl<'a> ExecutionContext<'a> {
         &mut self,
         evaluate_value: &LambdaFunction,
         var_index: usize,
-        name: &str
     ) -> Value {
         let bound_value = self.run_lambda_trampoline(evaluate_value);
         let call_stack_index = self.call_stack.len() - 1;
@@ -257,8 +216,68 @@ impl<'a> ExecutionContext<'a> {
             frame_bindings.push(bound_value);
             self.frame_mut().let_bindings_pushed.push(var_index);
         }
-        //println!("Let {name} {var_index} =  {bound_value:?} in stack {call_stack_index}");
         return bound_value;
+    }
+
+    fn eval_var(&self, index: usize) -> Value {
+        //@PERF no clone pls
+        //println!("Trying to get var {index} {varname}");
+        let var_stack = self.let_bindings.get(index);
+        match var_stack {
+            Some(value) => match value.last() {
+                Some(s) => {
+                    //println!("Loading var {varname} {index}");
+                    *s
+                }
+                None => {
+                    //try to load from environment
+                    let closure_env = self.frame().closure_environment;
+                    let env = &self.closure_environments[closure_env];
+                    //println!("Loading closure var {varname} {index}");
+
+                    if let Some(s) = env.get(&index) {
+                        *s
+                    } else {
+                        let var_name = &self.string_values[index];
+                        panic!("Variable {var_name} not found")
+                    }
+                }
+            }, //will only be cloned and heap allocated on complex structures
+            None => {
+                let var_name = &self.string_values[index];
+                panic!("Variable {var_name} not found")
+            }
+        }
+    }
+
+    fn eval_var_ref(&self, index: usize) -> &Value {
+        let var_stack = self.let_bindings.get(index);
+
+        match var_stack {
+            Some(value) => match value.last() {
+                Some(s) => {
+                    //println!("Loading var {varname} {index}");
+                    s
+                }
+                None => {
+                    //try to load from environment
+                    let closure_env = self.frame().closure_environment;
+                    let env = &self.closure_environments[closure_env];
+                    //println!("Loading closure var {varname} {index}");
+
+                    if let Some(s) = env.get(&index) {
+                        s
+                    } else {
+                        let var_name = &self.string_values[index];
+                        panic!("Variable {var_name} not found")
+                    }
+                }
+            }, //will only be cloned and heap allocated on complex structures
+            None => {
+                let var_name = &self.string_values[index];
+                panic!("Variable {var_name} not found")
+            }
+        }
     }
 
     fn eval_if(
@@ -274,6 +293,17 @@ impl<'a> ExecutionContext<'a> {
             _ => {
                 panic!("Type error: Cannot evaluate condition on this value: {condition_result:?}")
             }
+        }
+    }
+
+    fn binop_mul(&mut self, evaluate_lhs: &LambdaFunction, evaluate_rhs: &LambdaFunction) -> Value {
+        let lhs = evaluate_lhs(self);
+        let rhs = evaluate_rhs(self);
+        match (&lhs, &rhs) {
+            (Value::Int(lhs), Value::Int(rhs)) => Value::Int(lhs * rhs),
+            _ => panic!(
+                "Type error: Cannot apply binary operator Mul on these values: {lhs:?} and {rhs:?}"
+            ),
         }
     }
 
@@ -307,18 +337,20 @@ impl<'a> ExecutionContext<'a> {
         called_name: &str,
     ) -> Value {
         let callee_function = evaluate_callee(self);
-        let Value::Closure(ClosurePointer(p)) = callee_function.clone() else {
-            panic!("Call to non-function value {called_name}: {callee_function:?}")
+        let Value::Closure(ClosurePointer(p)) = callee_function else {
+            panic!("Call to non-function value {called_name}")
         };
         let Closure { callable_index, closure_env_index } = self.closures[p as usize];
         let callable = &self.functions[callable_index as usize];
 
+    
+
         if callable.parameters.len() != arguments.len() {
             panic!("Wrong number of arguments for function {called_name}")
         }
-        
-       // println!("Calling {called_name} {callable_index} {closure_env_index} {p:?}");
+        // println!("Calling {called_name}");
 
+        
         let mut reuse_frame = false;
         
        // println!("Running trampolines: {:?}", self.running_trampolines);
@@ -378,8 +410,7 @@ impl<'a> ExecutionContext<'a> {
 
         buf.clear();
         arguments.iter()
-            .map(|argument| 
-                self.run_lambda_trampoline(argument))
+            .map(|argument| (argument(self)))
             .collect_into(&mut buf);
         //evaluate the arguments
         for (argument, param) in buf.iter_mut().zip(callable.parameters) {
@@ -398,12 +429,22 @@ impl<'a> ExecutionContext<'a> {
         //which needs to be destroyed after the while loop
         let num_stack_frames_before = self.call_stack.len(); 
 
+        //even TCO'd functions have environments and they must be passed along somehow.
+        //The tail function call might have referenced something other than the current function args...
+        let mut tco_env_set = false;
+
         while let Value::Trampoline(ClosurePointer(p)) = current {
             let Closure { callable_index, closure_env_index } = self.closures[p as usize];
 
-            self.frame_mut().closure_environment = closure_env_index as usize;
-            self.frame_mut().tco_reuse_frame = true;
-          
+            if !tco_env_set {
+                self.frame_mut().tco_reuse_frame = true;
+                //TCO hack: we modify the current stack instead of creating a new one because
+                //this is faster and TCO is already a huge hack.
+                self.frame_mut().closure_environment = closure_env_index as usize;
+                tco_env_set = true;
+
+            }
+
             //println!("state {:#?}", ec.let_bindings);
             let callee = &self.functions[callable_index as usize];
             //println!("Eval result: {function_result:?} caller: {}", self.frame().function);
@@ -466,14 +507,11 @@ impl<'a> ExecutionContext<'a> {
                 new_frame.function = callable_index as usize;
                 new_frame.closure_environment = closure_env_index as usize;
                 new_frame.tco_reuse_frame = false;
-                new_frame.let_bindings_pushed.clear();
-                new_frame.stack_index = self.call_stack.len();
                 new_frame
             }
             None => {
                 StackFrame {
                     function: callable_index as usize,
-                    stack_index: self.call_stack.len(),
                     let_bindings_pushed: vec![],
                     closure_environment: closure_env_index as usize,
                     tco_reuse_frame: false
@@ -498,13 +536,11 @@ impl<'a> ExecutionContext<'a> {
 
             buf.clear();
             arguments.iter()
-                .map(|argument| 
-                    self.run_lambda_trampoline(argument))
+                .map(|argument| (argument(self)))
                 .collect_into(&mut buf);
                 //evaluate the arguments
             for (argument, param) in buf.iter().zip(params) {
                 new_frame.let_bindings_pushed.push(*param);
-                //println!("Pushing arg {param} {argument:?}");
                 self.let_bindings[*param].push(argument.clone());
             }
             self.arg_eval_buffer.push(buf);
@@ -517,8 +553,8 @@ impl<'a> ExecutionContext<'a> {
         evaluate_first: &LambdaFunction,
         evaluate_second: &LambdaFunction,
     ) -> Value {
-        let f = self.run_lambda_trampoline(evaluate_first);
-        let s = self.run_lambda_trampoline(evaluate_second);
+        let f = evaluate_first(self);
+        let s = evaluate_second(self);
         match (f, s) {
             (Value::Int(a), Value::Int(b)) => {
                 //transform into i16 if in range
@@ -630,40 +666,119 @@ impl LambdaCompiler {
     //whenever a function is constructed, it captures the environment. This is a closure.
     //also don't closure over let bindings
 
+    
+    fn get_closure(&mut self, body: &[&Expr], params: &mut HashSet<String>, current_fn_let_bindings: &mut HashSet<String>) -> HashSet<String> {
+        let mut closure = HashSet::new();
+        for expr in body {
+            match expr {
+                Expr::Let { value, name } =>{
+                    current_fn_let_bindings.insert(name.to_string());
+                    let value_closure = self.get_closure(&[value], params, current_fn_let_bindings);
+                    closure.extend(value_closure);
+                }
+                Expr::Var { name } => {
+                    if !(params.contains(name) || current_fn_let_bindings.contains(name)) {
+                        closure.extend(vec![name.to_string()].into_iter());
+                    }
+                }
+                Expr::If { cond, then, otherwise } =>{
+                    let mut cond_closure = self.get_closure(&[cond], params, current_fn_let_bindings);
+                    let then_closure = self.get_closure(&as_ref_slice(then), params, current_fn_let_bindings);
+                    let otherwise_closure = self.get_closure(&as_ref_slice(otherwise), params, current_fn_let_bindings);
+                    cond_closure.extend(then_closure);
+                    cond_closure.extend(otherwise_closure);
+                    closure.extend(cond_closure)
+                }
+                Expr::Tuple { first, second } => {
+                    let mut first_closure = self.get_closure(&[first], params, current_fn_let_bindings);
+                    let second_closure = self.get_closure(&[second], params, current_fn_let_bindings);
+                    first_closure.extend(second_closure);
 
-    fn compile_body(&mut self, body: &[Expr], function_data: FunctionData) -> (LambdaFunction, FunctionData) {
-        let mut lambdas = vec![];
-        let mut current_fdata = function_data;
-        
-        for ast in body {
-            let (lambda, fdata) = self.compile_internal(ast.clone(), current_fdata.clone(), None);
-            current_fdata = fdata;
-            lambdas.push(lambda);
+                    closure.extend(first_closure)
+                }
+                Expr::First { value } => {
+                    closure.extend(self.get_closure(&[value], params, current_fn_let_bindings))
+                }
+                Expr::Second { value } => {
+                    closure.extend(self.get_closure(&[value], params, current_fn_let_bindings))
+                }
+                Expr::Print { value } => {
+                    closure.extend(self.get_closure(&[value], params, current_fn_let_bindings))
+                }
+                Expr::FuncDecl(FuncDecl { is_tco_trampoline, .. }) if *is_tco_trampoline => {
+                
+                    //this may be an extreme oversimplification, but tco trampolines don't close over anything
+                    //they actually do but for them we can probably get away with it
+                  
+                }
+                Expr::FuncDecl(FuncDecl { params: func_params, body, .. }) => {
+                    //the analysis of regular funcdecls, not trampolines, is done by analyzing it in isolation, 
+                    //does not matter the context it is in.
+                    //but in the case of a TCO trampoline, we detect the variables in params that were used in the call, and don't closure over them again
+                    //we do this by extending the current params and passing along the chain
+                    //the funcdecl itself has 0 parameters
+                    //thi is an optimization, ```trampolines are generated in a very controlled way
+                    let mut new_function_params = HashSet::new();
+                    for p in func_params {
+                        new_function_params.insert(p.clone());
+                    }
+                    let mut new_let_bindings = HashSet::new();
+                    closure.extend(self.get_closure(&as_ref_slice(&body), &mut new_function_params, &mut new_let_bindings))
+                }
+                Expr::FuncCall { func, args } => {
+                    let mut f_closure = HashSet::new();
+
+                    f_closure.extend(self.get_closure(&[func], params, current_fn_let_bindings));
+
+                    for a in args {
+                        f_closure.extend(self.get_closure(&[a], params, current_fn_let_bindings));
+                    }
+                    closure.extend(f_closure)
+                }
+                Expr::BinOp { left, right, .. } => {
+                    let mut lhs_closure = self.get_closure(&[left], params, current_fn_let_bindings);
+                    let rhs_closure = self.get_closure(&[right], params, current_fn_let_bindings);
+                    lhs_closure.extend(rhs_closure);
+                    closure.extend(lhs_closure)
+                }
+                _ => {}
+            }
         }
-        (Box::new(move |ec: &mut ExecutionContext| {
+        closure
+    }
+
+    fn compile_body(&mut self, body: &[Expr], funcs_params: &mut HashSet<String>) -> LambdaFunction {
+        let mut lambdas = vec![];
+        for ast in body {
+            lambdas.push(self.compile_internal(ast.clone(), funcs_params));
+        }
+        Box::new(move |ec: &mut ExecutionContext| {
             let mut result = None;
             for lambda in lambdas.iter() {
                 result = Some(lambda(ec));
             }
             result.unwrap()
-        }), current_fdata)
+        })
     }
 
-    fn compile_internal(&mut self, ast: Expr, mut function_data: FunctionData, current_let: Option<String>) -> (LambdaFunction, FunctionData) {
-        let lambda: (LambdaFunction, FunctionData) = match ast {
+    fn compile_internal(&mut self, ast: Expr, funcs_params: &mut HashSet<String>) -> LambdaFunction {
+        let lambda: LambdaFunction = match ast {
             Expr::Print{ value } => {
-                let (evaluate_printed_value, fdata) = self.compile_internal(*value,  function_data, current_let);
+                let evaluate_printed_value = self.compile_internal(*value, funcs_params);
                 //because the type of the expression is only known at runtime, we have to check it in the print function during runtime :(
-                (Box::new(move |ec: &mut ExecutionContext| {
+                Box::new(move |ec: &mut ExecutionContext| {
                     //println!("Stack frame on print: {:?}", ec.frame().let_bindings);
                     let value_to_print =  ec.run_lambda_trampoline(&evaluate_printed_value);
                     println!("{}", value_to_print.to_string(ec));
                     return value_to_print
-                }), fdata)
+                })
             }
-            Expr::Int{value } => (Box::new(move |ec| ec.eval_int(value)), function_data),
+            Expr::Int{value } => Box::new(move |ec| ec.eval_int(value)),
             Expr::Var{ name, .. } => {
-                self.compile_eval_var(name, function_data)
+                let varname_leaked: &'static str = name.leak();
+                let index = self.intern_var_name(varname_leaked);
+
+                Box::new(move |ec: &mut ExecutionContext| ec.eval_var(index))
             }
            
             Expr::Let{
@@ -672,65 +787,61 @@ impl LambdaCompiler {
                // next
             } => {
 
-                if let Expr::FuncDecl(FuncDecl { params, body, ..  }) = &*value && name != "_" && self.is_tail_recursive(&body, &name) == TailRecursivity::TailRecursive {
+                if let Expr::FuncDecl(FuncDecl { params, body, ..  }) = &*value && name != "_" && self.is_tail_recursive(&body, &name) {
                     //the recursive call becomes a closure
                     let trampolined_function = self.into_tco(&body, &name);
                     let mut all_function_params = HashSet::new();
                     for p in params {
                         all_function_params.insert(p.to_string());
                     }
-                    
+                    let mut let_bindings = HashSet::new();
+                    let closure = self.get_closure(&as_ref_slice(&trampolined_function), &mut all_function_params, &mut let_bindings);
+                    let closure_set: Vec<_> = closure.into_iter().collect();
+    
                     //println!("Function got TCO'd {trampolined_function:#?}");
-                    let evaluate_value = self.compile_function( trampolined_function, params, None, function_data.clone(), Some(name.to_string()));
-                  
-                    function_data.let_bindings_so_far.insert(name.clone());
-                  
+                    let evaluate_value = self.compile_function(funcs_params, trampolined_function, params, &closure_set, true, None);
+
                     let var_name_leaked: &'static str = name.leak();
                     let var_index = self.intern_var_name(var_name_leaked);
-                    
-                    (Box::new(move |ec: &mut ExecutionContext| {
-                     //   println!("Evaluating Let {var_name_leaked}");
-                        ec.eval_let(&evaluate_value, var_index, var_name_leaked)
-                    }), function_data)
+                    Box::new(move |ec: &mut ExecutionContext| {
+                        //println!("Evaluating Let {var_name_leaked} TCO");
+                        ec.eval_let(&evaluate_value, var_index)
+                    })
                     
                 }
                 else {
-
-                    let (evaluate_value, mut fdata) = self.compile_internal(*value,  function_data, Some(name.to_string()));
+                    let evaluate_value = self.compile_internal(*value, funcs_params);
                     if name == "_" {
-                        (Box::new(move |ec: &mut ExecutionContext| {
+                        Box::new(move |ec: &mut ExecutionContext| {
                             ec.run_lambda_trampoline(&evaluate_value)
-                        }), fdata)
+                        })
                     } else {
-                        fdata.let_bindings_so_far.insert(name.clone());
                         let var_name_leaked: &'static str = name.leak();
                         let var_index = self.intern_var_name(var_name_leaked);
-                        (Box::new(move |ec: &mut ExecutionContext| {
+                        Box::new(move |ec: &mut ExecutionContext| {
                             //println!("Evaluating Let {var_name_leaked} non-tco");
                             //continuation into recursive call in next
-                            ec.eval_let(&evaluate_value, var_index, var_name_leaked)
-                        }), fdata)
+                            ec.eval_let(&evaluate_value, var_index)
+                        })
                     }
                 }
             }
            
            // Expr::Error(e) => panic!("{}: {}", e.message, e.full_text),
-            Expr::BinOp { op, left, right } => {
-                self.compile_binexp( left, right, op, function_data)
-            }
+            Expr::BinOp { op, left, right } => self.compile_binexp(funcs_params, left, right, op),
             Expr::String{value} => {
                 //let leaked: &'static str = value.leak();
-                (Box::new(move |ec| {
+                Box::new(move |ec| {
                     let current = ec.string_values.len();
                     ec.string_values.push(value.clone());
                     Value::Str(StringPointer(current as u32))
-                }), function_data)
+                })
             }
             Expr::FuncCall {
                 func, args
             } => {
-                let (callee, arguments, name, called_name, call_fdata) = self.compile_call_data(&func,  &args, function_data);
-                (Box::new(move |ec: &mut ExecutionContext| {
+                let (callee, arguments, name, called_name) = self.compile_call_data(&func, funcs_params, &args);
+                Box::new(move |ec: &mut ExecutionContext| {
                     //println!("Calling {called_name} {}", ec.frame().function);
                     let result = ec.eval_call(
                         &callee,
@@ -740,22 +851,27 @@ impl LambdaCompiler {
                     );
                     //println!("Called {called_name} result = {result:?}");
                     result
-                }), call_fdata)
+                })
             },
             fdecl @ Expr::FuncDecl(..) => {
+                //let it find the function params
+                let mut all_function_params = funcs_params.clone();
+                let mut let_bindings = HashSet::new();
+                let closure = self.get_closure(&[&fdecl], &mut all_function_params, &mut let_bindings);
                 let Expr::FuncDecl(FuncDecl {
                     params, body, is_tco_trampoline,
                 }) = fdecl else {
                     unreachable!()
                 };
                 
+                let closure_set: Vec<_> = closure.into_iter().collect();
+
                 let trampoline = if is_tco_trampoline {
                     Some(self.closure_stack.last().copied().unwrap())
                 } else {
                     None
                 };
-                let lambda_f = self.compile_function( body, &params, trampoline, function_data.clone(), current_let);
-                (lambda_f, function_data)
+                self.compile_function(funcs_params, body, &params, &closure_set, false, trampoline)
             }
             Expr::If {
                 cond,
@@ -763,18 +879,18 @@ impl LambdaCompiler {
                 otherwise,
                 ..
             } => {
-                let (evaluate_condition, condition_fdata) = self.compile_internal(*cond.clone(),  function_data, current_let);
-                let (evaluate_then, then_fdata) = self.compile_body(&then.clone(),  condition_fdata);
-                let (evaluate_otherwise, otherwise_fdata) = self.compile_body(&otherwise.clone(),  then_fdata);
-                (Box::new(move |ec: &mut ExecutionContext| {
+                let evaluate_condition = self.compile_internal(*cond, funcs_params);
+                let evaluate_then = self.compile_body(&then, funcs_params);
+                let evaluate_otherwise = self.compile_body(&otherwise, funcs_params);
+                Box::new(move |ec: &mut ExecutionContext| {
                     ec.eval_if(&evaluate_condition, &evaluate_then, &evaluate_otherwise)
-                }), otherwise_fdata)
+                })
             }
             //only works on tuples
             Expr::First{ value, .. } => {
-                let (evaluate_value, first_fdata) = self.compile_internal(*value,  function_data, current_let);
-                (Box::new(move |ec: &mut ExecutionContext| {
-                    let value = ec.run_lambda_trampoline(&evaluate_value);
+                let evaluate_value = self.compile_internal(*value, funcs_params);
+                Box::new(move |ec: &mut ExecutionContext| {
+                    let value = evaluate_value(ec);
                     match value {
                         Value::Tuple(ptr) => {
                             let (a, _) = &ec.tuples[ptr.0 as usize];
@@ -787,12 +903,12 @@ impl LambdaCompiler {
                         Value::IntBoolTuple(a, _) => Value::Int(a),*/
                         _ => panic!("Type error: Cannot evaluate first on this value: {value:?}"),
                     }
-                }), first_fdata)
+                })
             }
             Expr::Second{ value, .. } => {
-                let (evaluate_value, second_fdata) = self.compile_internal(*value,  function_data, current_let);
-                (Box::new(move |ec: &mut ExecutionContext| {
-                    let value = ec.run_lambda_trampoline(&evaluate_value);
+                let evaluate_value = self.compile_internal(*value, funcs_params);
+                Box::new(move |ec: &mut ExecutionContext| {
+                    let value = evaluate_value(ec);
                     match value {
                         Value::Tuple(ptr) => {
                             let (_, b) = &ec.tuples[ptr.0 as usize];
@@ -803,223 +919,86 @@ impl LambdaCompiler {
                         Value::BoolTuple(_, a) => Value::Bool(a),
                         Value::BoolIntTuple(_, a) => Value::Int(a),
                         Value::IntBoolTuple(_, a) => Value::Bool(a),*/
-                        _ => panic!("Type error: Cannot evaluate second on this value: {}", value.to_string(ec)),
+                        _ => panic!("Type error: Cannot evaluate first on this value: {value:?}"),
                     }
-                }), second_fdata)
+                })
             }
-            Expr::Bool { value, .. } => (Box::new(move |_| Value::Bool(value)),function_data),
+            Expr::Bool { value, .. } => Box::new(move |_| Value::Bool(value)),
             Expr::Tuple { first, second, .. } => {
-                let (evaluate_first, first_fdata) = self.compile_internal(*first,  function_data, None);
-                let (evaluate_second, second_fdata) = self.compile_internal(*second,  first_fdata, None);
-                (Box::new(move |ec: &mut ExecutionContext| {
+                let evaluate_first = self.compile_internal(*first, funcs_params);
+                let evaluate_second = self.compile_internal(*second, funcs_params);
+                Box::new(move |ec: &mut ExecutionContext| {
                     ec.eval_tuple(&evaluate_first, &evaluate_second)
-                }), second_fdata)
+                })
             }
         };
 
         return lambda;
-
-    }
-
-    fn compile_eval_var(&mut self, name: String, function_data: FunctionData) -> (Box<dyn Fn(&mut ExecutionContext<'_>) -> Value>, FunctionData) {
-        let varname: &'static str = name.leak();
-        let index = self.intern_var_name(varname);
-        //println!("Compiling var {varname} {index} on function {:?}", function_data.name);
-        //where is the var available? in the let bindings of the function? check function data
-
-        if function_data.let_bindings_so_far.contains(varname) {
-            //println!("Compiling as let binding fetch");
-            (Box::new(move |ec: &mut ExecutionContext| {
-                let var = ec.let_bindings.get(index)
-                    .and_then(|x| x.last()); //this is correct! we want the last value pushed, not all vars are pushed in all frames
-                if let Some(value) = var {
-                    //println!("Loading var from bindings {varname} {index}");
-                    *value
-                } else {
-                    panic!("Variable {varname} not found in bindings")
-                }
-            }), function_data)
-        } else if function_data.parameters.contains(varname) {
-           //println!("Compiling as parameter fetch");
-
-            (Box::new(move |ec: &mut ExecutionContext| {
-                //function params are in the let bindings too
-                let var = ec.let_bindings.get(index)
-                    .and_then(|x| x.last());
-                if let Some(value) = var {
-                    //println!("Loading var from bindings {varname} {index}");
-                    *value
-                } else {
-                    panic!("Variable {varname} not found in bindings")
-                }
-            }), function_data)
-        } else if function_data.closure.contains(varname) {
-            //println!("Compiling as closure fetch, trampoline {:?}, let bindings: {:?}", function_data.trampoline_of, function_data.let_bindings_so_far);
-            //need to find the index of this name in the closure 
-            //btreeset is ordered so we can iterate, there is no index_of function or something similar
-            let mut found = None;
-            for (i, var) in function_data.closure.iter().enumerate() {
-                if var == varname {
-                    found = Some(i);
-                }
-            }
-
-            let closure_var_idx = found.unwrap();
-
-            (Box::new(move |ec: &mut ExecutionContext| {
-                let closure_env = ec.frame().closure_environment;
-                let env = &ec.closure_environments[closure_env];
-                //println!("Loading closure var {varname} {index}");
-
-                if let Some(s) = env.get(closure_var_idx) {
-                   // println!("Loaded {:?}", s);
-                    *s
-                } else {
-                    panic!("Variable {varname} not found in closure")
-                }
-            }), function_data)
+        /*if do_trampolining {
+            Box::new(move |ec| {
+                let result = lambda(ec);
+                let trampoline_result = ec.run_trampoline(result);
+                return trampoline_result;
+            })
         } else {
-            if let Some(current_fname) = &function_data.name {
-                //println!("Compiling as fetch");
+            lambda
+        }*/
 
-                if current_fname == varname {
-                    //println!("Loading var from bindings {varname} {index}");
-                    (Box::new(move |ec: &mut ExecutionContext| {
-                        let var = ec.let_bindings.get(index)
-                            .and_then(|x| x.last()); //this is correct! we want the last value pushed, not all vars are pushed in all frames
-                        if let Some(value) = var {
-                            //println!("Loading var from bindings {varname} {index}");
-                            *value
-                        } else {
-                            panic!("Variable {varname} not found in bindings")
-                        }
-                    }), function_data)
-                } else {
-                    panic!("Variable {varname} not found during compilation")
-                }
-            } else {
-                panic!("Variable {varname} not found during compilation")
-            }
-        }
     }
 
-    fn compile_call_data(&mut self, func: &Box<Expr>,  args: &[Expr], function_data: FunctionData ) -> (Box<dyn Fn(&mut ExecutionContext<'_>) -> Value>, Vec<Box<dyn Fn(&mut ExecutionContext<'_>) -> Value>>, Option<usize>, &'static str, FunctionData) {
-        match &**func {
+    fn compile_call_data(&mut self, func: &Box<Expr>, funcs_params: &mut HashSet<String>, args: &[Expr]) -> (Box<dyn Fn(&mut ExecutionContext<'_>) -> Value>, Vec<Box<dyn Fn(&mut ExecutionContext<'_>) -> Value>>, Option<usize>, &'static str) {
+        let (callee, arguments, name, called_name) = match &**func {
             Expr::Var {name} => {
                 let called_name: &'static str = name.clone().leak();
                 let function_name_index = self.intern_var_name(called_name);
-                let (evaluate_callee, mut fdata) = self.compile_internal(*func.clone(),  function_data, None);
-             
-                let mut arguments: Vec<LambdaFunction> = vec![];
-                for arg in args {
-                    let (lambda, new_fdata) = self.compile_internal(arg.clone(),  fdata.clone(), None);
-                    fdata = new_fdata;
-                    arguments.push(lambda);
-                }
-                (evaluate_callee, arguments, Some(function_name_index), called_name, fdata)
+                let evaluate_callee = self.compile_internal(*func.clone(), funcs_params);
+                let arguments = args
+                    .into_iter()
+                    .map(|arg| self.compile_internal(arg.clone(), funcs_params))
+                    .collect::<Vec<_>>();
+                (evaluate_callee, arguments, Some(function_name_index), called_name)
         
             }
             other => {
                 let called_name: &'static str = "anonymous function";
-                let (evaluate_callee, mut fdata) = self.compile_internal(other.clone(),  function_data, None);
-
-                let mut arguments: Vec<LambdaFunction> = vec![];
-                for arg in args {
-                    let (lambda, new_fdata) = self.compile_internal(arg.clone(),  fdata.clone(), None);
-                    fdata = new_fdata;
-                    arguments.push(lambda);
-                }
-                (evaluate_callee, arguments, None, called_name, fdata)
+                let evaluate_callee = self.compile_internal(other.clone(), funcs_params);
+                let arguments = args
+                    .into_iter()
+                    .map(|arg| self.compile_internal(arg.clone(), funcs_params))
+                    .collect::<Vec<_>>();
+       
+                (evaluate_callee, arguments, None, called_name)
             }
-        }
+        };
+        (callee, arguments, name, called_name)
     }
 
-    fn compile_function(&mut self, body: Vec<Expr>, parameters: &[String], trampoline_of: Option<usize>,
-        parent_function_data: FunctionData,
-        current_let: Option<String>
-    ) -> LambdaFunction {
+    fn compile_function(&mut self, funcs_params: &mut HashSet<String>,  body: Vec<Expr>, parameters: &[String], closure: &[String], tco: bool, trampoline_of: Option<usize>) -> LambdaFunction {
         //Functions are compiled and stored into a big vector of functions, each one has a unique ID.
         //value will be the call itself, we're compiling the body of the tco trampoline
-    
-      
-        let mut let_bindings_so_far = {
-            if let Some(cur) = &current_let {
-                let mut new_let_bindings_so_far = BTreeSet::new();
-                //insert the function itself in the let bindings for the compilation
-                new_let_bindings_so_far.insert(cur.clone());
-                new_let_bindings_so_far
-            } else {
-                BTreeSet::new()
-            }
-        };
-        let mut function_data = if let Some(_) = trampoline_of {
-            //trampoline optimization: we're going to reuse the frame of the function we're trampolining
-            //therefore the let bindings, paramters and closure should be the same
-
-            //also, on a trampoline, put the parent function in scope too 
-            if let Some(name) = parent_function_data.name {
-                let_bindings_so_far.insert(name);
-            }
-
-            //also we need the let bindings of the parent function too
-            let_bindings_so_far.extend(parent_function_data.let_bindings_so_far.clone());
-
-            //println!("let bindings: {:?}", let_bindings_so_far);
-
-            FunctionData {
-                name: None,
-                let_bindings_so_far,
-                parameters: parent_function_data.parameters,
-                closure: parent_function_data.closure,
-                trampoline_of: None
-            }
-        } else {
-            FunctionData {
-                let_bindings_so_far,
-                name: current_let,
-                parameters: parameters.iter().map(|x| x.clone()).collect(),
-                closure: {
-                    //this is going to be all the things in the parent_function_data combined
-                    let mut closure = BTreeSet::new();
-                    for c in parent_function_data.let_bindings_so_far.into_iter() {
-                        closure.insert(c);
-                    }
-                    for c in parent_function_data.parameters.into_iter() {
-                        closure.insert(c);
-                    }
-                    for c in parent_function_data.closure.into_iter() {
-                        closure.insert(c);
-                    }
-
-                    closure
-                },
-                trampoline_of: trampoline_of.clone()
-            }
-        };
-        
-        
-
-    
+        //println!("Compile function: {value:#?} location: {location:?}");
         let index_of_new_function = self.all_functions.len();
         let callable = Callable {
             body: Box::new(|_| panic!("Empty body, function not compiled")),
             parameters: &[],
+            tco_optimized: false,
             trampoline_of: None,
             closure_indices: &[]
             //location
         };
         self.all_functions.push(callable);
         self.closure_stack.push(index_of_new_function);
-      
+        let mut new_params = funcs_params.clone();
+        for param in parameters.iter() {
+            new_params.insert(param.to_string());
+        }
         //this will return the lambda for the call to iter
         //let new_function = self.compile_internal(value, &mut new_params);
 
-        let mut body_lambdas = vec![];
-        for expr in body.iter() {
-            let (lambda, new_fdata) = self.compile_internal(expr.clone(), function_data, None);
-            function_data = new_fdata;
-            body_lambdas.push(lambda);
-        }
+        let body_lambdas: Vec<LambdaFunction> = body
+            .into_iter()
+            .map(|expr| self.compile_internal(expr, &mut new_params))
+            .collect::<Vec<_>>();
 
         let new_function: LambdaFunction = Box::new(move |ec: &mut ExecutionContext| {
             let mut last = None;
@@ -1041,27 +1020,24 @@ impl LambdaCompiler {
             param_indices.push(interned);
         }
 
-        let closure = function_data.closure
-            .iter()
+        let closure = closure
+            .into_iter()
             .map(|param| param.clone())
             .collect::<Vec<_>>();
-        
         let mut closure_indices = vec![];
         for closure_param in closure {
             let interned = self.intern_var_name(closure_param.leak());
             closure_indices.push(interned);
         }
-        
         let callable = self.all_functions.get_mut(index_of_new_function).unwrap();
         *callable = Callable {
             body: new_function,
             parameters: param_indices.leak(),
+            tco_optimized: tco,
             trampoline_of,
             closure_indices: closure_indices.leak()
             //location
         };
-
-        //println!("Created callable with {} closured vars", callable.closure_indices.len());
         self.closure_stack.pop();
         if trampoline_of.is_none() {
             if callable.closure_indices.len() > 0 {
@@ -1122,128 +1098,35 @@ impl LambdaCompiler {
         new_body
     }
 
-
-
-    fn is_tail_recursive(&mut self, body: &[Expr], fname: &str) -> TailRecursivity {
-        
-
-        for  value in body.iter() {
-          
-
+    pub fn is_tail_recursive(&mut self, body: &[Expr], fname: &str) -> bool {
+        //println!("Checking if is tail recursive: {fname} \n${value:#?}");
+        for value in body {
             match value {
-      
-                Expr::Let { value, .. } => {
-                    match self.is_tail_recursive(&[*value.clone()], fname) {
-                        //right, the value of the let expression is tail recursive, but the mere presence of a let expression means there are more expressions to evaluate,
-                        //therefore it's not tail recursive 
-                        TailRecursivity::TailRecursive => return TailRecursivity::NotTailRecursive,
-                        _ => { } //continue evaluating tail recursivity, maybe the next expression is tail recursive... or not :)
-                    }
-                }
                 Expr::FuncCall { func, .. } => {
                     match &**func {
-                        //if we find a function call to the same function, and it's the last expression (it is because it's either the only function or the follow up to the last let expr), otherwise it's not
-                        //because after the function call, more expressions need to be evaluated. we can do an early return.
-                        Expr::Var{ name, .. } if name == fname => return TailRecursivity::TailRecursive,
-                        //it's a function call to some other function, not self recursive.
-                        Expr::Var{ .. } => return TailRecursivity::NotSelfRecursive,
-                        _ => { 
-                            //if it's a call to some other kind of function, then we could do more analysis...
-                            //but for now we just assume it's not tail recursive
-                            return TailRecursivity::NotTailRecursive;
-                        }
+                        Expr::Var{ name, .. } if name == fname => return true,
+                        _ => { }
                     }
                 }
-                Expr::If { then, otherwise, cond } => {
-                    //if the condition itself is tail recursive, it means the function is not because more exprs will be evaluated depending on the branch.
-                    match self.is_tail_recursive(&[*cond.clone()], fname) {
-                        TailRecursivity::TailRecursive => return TailRecursivity::NotTailRecursive,
-                        _ => { } //continue evaluating tail recursivity
-                    }
-
-                    let then_branch = self.is_tail_recursive(then, fname);
-                    let otherwise_branch = self.is_tail_recursive(otherwise, fname);
-
-                    match (then_branch, otherwise_branch) {
-                        //if either branch is not tail recursive, then the whole thing is not tail recursive
-                        (TailRecursivity::NotTailRecursive, _) | (_, TailRecursivity::NotTailRecursive) => return TailRecursivity::NotTailRecursive,
-                        (TailRecursivity::NotSelfRecursive, TailRecursivity::NotSelfRecursive) => return TailRecursivity::NotSelfRecursive,
-                        (TailRecursivity::TailRecursive, TailRecursivity::TailRecursive) => return TailRecursivity::TailRecursive,
-                        (TailRecursivity::TailRecursive, TailRecursivity::NotSelfRecursive) =>return TailRecursivity::TailRecursive,
-                        (TailRecursivity::NotSelfRecursive, TailRecursivity::TailRecursive) =>return TailRecursivity::TailRecursive,
+               
+                Expr::If { then, otherwise, .. } => {
+                    let is_tailrec = self.is_tail_recursive(then, fname) || self.is_tail_recursive(otherwise, fname);
+                    if is_tailrec {
+                        return true
                     }
                 }
-                Expr::Tuple { first, second } => {
-                    let first_branch = self.is_tail_recursive(&[*first.clone()], fname);
-                    let second_branch = self.is_tail_recursive(&[*second.clone()], fname);
-
-                    match (first_branch, second_branch) {
-                        //if either branch is not tail recursive, then the whole thing is not tail recursive
-                        (TailRecursivity::NotSelfRecursive, TailRecursivity::NotSelfRecursive) => return TailRecursivity::NotSelfRecursive,
-                        _ => return TailRecursivity::NotTailRecursive,
-                    }
-                }
-
-                Expr::Var { .. } => return TailRecursivity::NotSelfRecursive,
-                Expr::Int { .. } => return TailRecursivity::NotSelfRecursive,
-                Expr::Bool { .. } =>  return TailRecursivity::NotSelfRecursive,
-                Expr::String { .. } =>  return TailRecursivity::NotSelfRecursive,
-
-                Expr::First { value } => {
-                    match self.is_tail_recursive(&[*value.clone()], fname) {
-                        TailRecursivity::TailRecursive | TailRecursivity::NotTailRecursive  => return TailRecursivity::NotTailRecursive,
-                        TailRecursivity::NotSelfRecursive => return TailRecursivity::NotSelfRecursive,
-                    }
-                }
-                Expr::Second { value } => {
-                    match self.is_tail_recursive(&[*value.clone()], fname) {
-                        TailRecursivity::TailRecursive | TailRecursivity::NotTailRecursive  => return TailRecursivity::NotTailRecursive,
-                        TailRecursivity::NotSelfRecursive => return TailRecursivity::NotSelfRecursive,
-                    }
-                }
-                Expr::Print { value } => {
-                    match self.is_tail_recursive(&[*value.clone()], fname) {
-                        TailRecursivity::TailRecursive | TailRecursivity::NotTailRecursive  => return TailRecursivity::NotTailRecursive,
-                        TailRecursivity::NotSelfRecursive => return TailRecursivity::NotSelfRecursive,
-                    }
-                }
-                Expr::FuncDecl(_) => {
-                    //this is very weird, a recursive function that returns another function...
-                    //I don't know the interpreter can deal with that beyond trampolines, just return not recursive...
-                    return TailRecursivity::NotTailRecursive;
-                }
-                Expr::BinOp { left, right, .. } => {
-                    let lhs_branch = self.is_tail_recursive(&[*left.clone()], fname);
-                    let rhs_branch = self.is_tail_recursive(&[*right.clone()], fname);
-
-                    match (lhs_branch, rhs_branch) {
-                        //if either branch is not tail recursive, then the whole thing is not tail recursive
-                        (TailRecursivity::NotSelfRecursive, TailRecursivity::NotSelfRecursive) => return TailRecursivity::NotSelfRecursive,
-                        _ => return TailRecursivity::NotTailRecursive,
-                    }
-                }
+                _ => { }
             }
-        };
-
-        //We don't know and maybe don't care whether this is recursive or not recursive, but we consider it won't be tail recursive
-        return TailRecursivity::NotTailRecursive;
+        }
+        false
     }
 
     pub fn compile(mut self, ast: Vec<Expr>) -> CompilationResult {
-
-        let mut lambdas: Vec<LambdaFunction> = vec![];
-        let mut function_data = FunctionData {
-            name: Some("___root_fn___".to_string()),
-            let_bindings_so_far: BTreeSet::new(),
-            parameters: BTreeSet::new(),
-            closure: BTreeSet::new(),
-            trampoline_of: None
-        };
-        for expr in ast.into_iter() {
-            let (lambda, fdata) = self.compile_internal(expr, function_data.clone(), None);
-            function_data = fdata;
-            lambdas.push(lambda);
-        }
+        let mut params = HashSet::new();
+        let lambdas: Vec<LambdaFunction> = ast
+            .into_iter()
+            .map(|expr| self.compile_internal(expr, &mut params))
+            .collect::<Vec<_>>();
         //trampolinize the returned value
         let trampolinized: LambdaFunction = Box::new(move |ec: &mut ExecutionContext| {
             let mut last = None;
@@ -1263,11 +1146,11 @@ impl LambdaCompiler {
   
     fn compile_binexp_opt<'a>(
         &mut self,
+        funcs_params: &mut HashSet<String>,
         lhs: Box<Expr>,
         rhs: Box<Expr>,
         op: BinaryOp,
-        function_data: FunctionData
-    ) -> Option<(LambdaFunction, FunctionData)> { 
+    ) -> Option<LambdaFunction> { 
         macro_rules! comparison_op {
             ($lhs:expr, $rhs:expr, $ec:expr, $op:tt) => {
                 match ($lhs, $rhs) {
@@ -1276,8 +1159,8 @@ impl LambdaCompiler {
                         Value::Bool(lhs $op rhs)
                     },
                     (Value::Str(StringPointer(lhs)), Value::Str(StringPointer(rhs))) => {
-                        let lhs = &$ec.string_values[lhs as usize];
-                        let rhs = &$ec.string_values[rhs as usize];
+                        let lhs = &$ec.string_values[*lhs as usize];
+                        let rhs = &$ec.string_values[*rhs as usize];
                         Value::Bool(lhs $op rhs)
                     }
                     (Value::Bool(lhs), Value::Bool(rhs)) => {
@@ -1296,7 +1179,7 @@ impl LambdaCompiler {
                 match ($lhs, $rhs) {
                     (Value::Bool(lhs), Value::Bool(rhs)) => {
                         //println!("Sum {lhs} {rhs}");
-                        Value::Bool(lhs $op rhs)
+                        Value::Bool(*lhs $op *rhs)
                     },
                     _ => panic!(
                         "Type error: Cannot apply binary operator {op} on these values: {lhs:?} and {rhs:?}",
@@ -1362,69 +1245,85 @@ impl LambdaCompiler {
         }
 
         let e = (&*lhs, &*rhs);
-        let result: (LambdaFunction, FunctionData) = match e {
+        let result: LambdaFunction = match e {
          
-           
-            //LHS is anything, RHS is int
-            (lhs, Expr::Int { value } ) => {
+            //If we know beforehand that both sides are var, avoid doing too much indirection just to get the var values
+            (Expr::Var { name: lhs_name }, Expr::Var { name: rhs_name }) => {
                 
-                let (index_lhs, lhs_fdata) = self.compile_internal(lhs.clone(), function_data, None);
+                let index_lhs = self.intern_var_name(lhs_name);
+                let index_rhs = self.intern_var_name(rhs_name);
+
+                macro_rules! variable_binop {
+                    ($op:tt, $operation_name:ident) => {
+                        Box::new(move |ec: &mut ExecutionContext| {
+                            let lhs = ec.eval_var_ref(index_lhs);
+                            let rhs = ec.eval_var_ref(index_rhs);
+                           
+                            $operation_name!(lhs, rhs, ec, $op)
+                        })
+                    }
+                }
+                dispatch_bin_op!(variable_binop, op)
+            }
+             //LHS is var, RHS is int
+            (Expr::Var { name: lhs_name }, Expr::Int { value } ) => {
+                
+                let index_lhs = self.intern_var_name(lhs_name);
                 let int_value = Value::Int(*value);
-   
                 macro_rules! variable_int_binop {
                     ($op:tt, $operation_name:ident) => {
-                        (Box::new(move |ec: &mut ExecutionContext| {
-                            let lhs = ec.run_lambda_trampoline(&index_lhs);
-                            $operation_name!(lhs, int_value, ec, $op)
-                        }), lhs_fdata)
+                        Box::new(move |ec: &mut ExecutionContext| {
+                            let lhs = ec.eval_var_ref(index_lhs);
+                            $operation_name!(lhs, &int_value, ec, $op)
+                        })
                     }
                 }
                 dispatch_bin_op!(variable_int_binop, op)
             }
-            //LHS could be anything, RHS is bool
-            (lhs, Expr::Bool { value } ) => {
+            //LHS is var, RHS is bool
+            (Expr::Var { name: lhs_name }, Expr::Bool { value } ) => {
                 
-                let (index_lhs, lhs_fdata) = self.compile_internal(lhs.clone(), function_data, None);
-                            let bool_value = Value::Bool(*value);
-
-                macro_rules! variable_int_binop {
-                    ($op:tt, $operation_name:ident) => {
-                        (Box::new(move |ec: &mut ExecutionContext| {
-                            let lhs = ec.run_lambda_trampoline(&index_lhs);
-                            $operation_name!(lhs, bool_value, ec, $op)
-                        }), lhs_fdata)
-                    }
-                }
-                dispatch_bin_op!(variable_int_binop, op)
-            }
-             //LHS is int, RHS could be anything
-             ( Expr::Int { value }, rhs ) => {
-
-                let (index_rhs, rhs_fdata) = self.compile_internal(rhs.clone(), function_data, None);
-                let int_value = Value::Int(*value);
-
-                macro_rules! variable_int_binop {
-                    ($op:tt, $operation_name:ident) => {
-                       (Box::new(move |ec: &mut ExecutionContext| {
-                            let rhs = ec.run_lambda_trampoline(&index_rhs);
-                            $operation_name!(int_value, rhs, ec, $op)
-                        }), rhs_fdata)
-                    }
-                }
-                dispatch_bin_op!(variable_int_binop, op)
-            }
-            //LHS is bool, RHS could be anything
-            ( Expr::Bool { value }, rhs ) => {
-                
-                let (index_rhs, rhs_fdata) = self.compile_internal(rhs.clone(), function_data, None);
+                let index_lhs = self.intern_var_name(lhs_name);
                 let bool_value = Value::Bool(*value);
 
                 macro_rules! variable_int_binop {
                     ($op:tt, $operation_name:ident) => {
-                        (Box::new(move |ec: &mut ExecutionContext| {
-                            let rhs = ec.run_lambda_trampoline(&index_rhs);
-                            $operation_name!(bool_value, rhs, ec, $op)
-                        }), rhs_fdata)
+                        Box::new(move |ec: &mut ExecutionContext| {
+                            let lhs = ec.eval_var_ref(index_lhs);
+                            $operation_name!(lhs, &bool_value, ec, $op)
+                        })
+                    }
+                }
+                dispatch_bin_op!(variable_int_binop, op)
+            }
+             //LHS is int, RHS is var
+             ( Expr::Int { value }, Expr::Var { name: lhs_name } ) => {
+                
+                let int_value = Value::Int(*value);
+                let index_rhs = self.intern_var_name(lhs_name);
+
+                macro_rules! variable_int_binop {
+                    ($op:tt, $operation_name:ident) => {
+                        Box::new(move |ec: &mut ExecutionContext| {
+                            let rhs = ec.eval_var_ref(index_rhs);
+                            $operation_name!(&int_value, rhs, ec, $op)
+                        })
+                    }
+                }
+                dispatch_bin_op!(variable_int_binop, op)
+            }
+            //LHS is bool, RHS is var
+            ( Expr::Bool { value }, Expr::Var { name: lhs_name } ) => {
+                
+                let bool_value = Value::Bool(*value);
+                let index_rhs = self.intern_var_name(lhs_name);
+
+                macro_rules! variable_int_binop {
+                    ($op:tt, $operation_name:ident) => {
+                        Box::new(move |ec: &mut ExecutionContext| {
+                            let rhs = ec.eval_var_ref(index_rhs);
+                            $operation_name!(&bool_value, rhs, ec, $op)
+                        })
                     }
                 }
                 dispatch_bin_op!(variable_int_binop, op)
@@ -1432,20 +1331,20 @@ impl LambdaCompiler {
             //both sides are function calls, just trigger both
             ( Expr::FuncCall {func: func_lhs, args:args_lhs }, Expr::FuncCall { func: func_rhs, args: args_rhs } ) => {
                 
-                let (callee_lhs, args_lhs, name_index_lhs, called_name_lhs, call_lhs) = self.compile_call_data(func_lhs,  args_lhs, function_data);
-                let (callee_rhs, args_rhs, name_index_rhs, called_name_rhs, call_rhs) = self.compile_call_data(func_rhs,  args_rhs, call_lhs);
+                let (callee_lhs, args_lhs, name_index_lhs, called_name_lhs) = self.compile_call_data(func_lhs, funcs_params, args_lhs);
+                let (callee_rhs, args_rhs, name_index_rhs, called_name_rhs) = self.compile_call_data(func_rhs, funcs_params, args_rhs);
                  
                 macro_rules! call_both_sides {
                     ($op:tt, $operation_name:ident) => {
-                        (Box::new(move |ec: &mut ExecutionContext| {
+                        Box::new(move |ec: &mut ExecutionContext| {
                             let call_lhs = ec.eval_call(&callee_lhs, &args_lhs, name_index_lhs, called_name_lhs);
                             let call_lhs = ec.run_trampoline(call_lhs);
     
                             let call_rhs = ec.eval_call(&callee_rhs, &args_rhs, name_index_rhs, called_name_rhs);
                             let call_rhs = ec.run_trampoline(call_rhs);
                            
-                            $operation_name!(call_lhs, call_rhs, ec, $op)
-                        }), call_rhs)
+                            $operation_name!(&call_lhs, &call_rhs, ec, $op)
+                        })
                     }
                 }
 
@@ -1460,25 +1359,25 @@ impl LambdaCompiler {
 
     fn compile_binexp(
         &mut self,
+        funcs_params: &mut HashSet<String>,
         lhs: Box<Expr>,
         rhs: Box<Expr>,
         op: BinaryOp,
-        function_data: FunctionData
-    ) -> (LambdaFunction, FunctionData) {
+    ) -> LambdaFunction {
 
         //tries to return an optimized version that does less eval_calls
-        let optimized = self.compile_binexp_opt( lhs.clone(), rhs.clone(), op.clone(), function_data.clone());
+        let optimized = self.compile_binexp_opt(funcs_params, lhs.clone(), rhs.clone(), op.clone());
         if let Some(opt) = optimized {
             return opt;
         }
 
 
-        let (evaluate_lhs, fdata_lhs) = self.compile_internal(*lhs,  function_data, None);
-        let (evaluate_rhs, fdata_rhs) = self.compile_internal(*rhs,  fdata_lhs, None);
+        let evaluate_lhs = self.compile_internal(*lhs, funcs_params);
+        let evaluate_rhs = self.compile_internal(*rhs, funcs_params);
 
         macro_rules! int_binary_numeric_op {
             ($op:tt) => {
-                (Box::new(move |ec: &mut ExecutionContext| {
+                Box::new(move |ec: &mut ExecutionContext| {
                     let lhs = ec.run_lambda_trampoline(&evaluate_lhs);
                     let rhs = ec.run_lambda_trampoline(&evaluate_rhs);
                     match (&lhs, &rhs) {
@@ -1487,7 +1386,7 @@ impl LambdaCompiler {
                         }
                         _ => panic!("Type error: Cannot apply binary operator {op} on these values: {lhs:?} and {rhs:?}", op = stringify!($op)),
                     }
-                }), fdata_rhs)
+                })
             };
         }
 
@@ -1495,7 +1394,7 @@ impl LambdaCompiler {
             ($op:tt) => {
 
                 if (self.strict_equals) {
-                    (Box::new(move |ec: &mut ExecutionContext| {
+                    Box::new(move |ec: &mut ExecutionContext| {
                         let lhs = ec.run_lambda_trampoline(&evaluate_lhs);
                         let rhs = ec.run_lambda_trampoline(&evaluate_rhs);
 
@@ -1513,24 +1412,26 @@ impl LambdaCompiler {
                             }
                             _ => panic!("Type error: Cannot apply binary operator {op} on these values: {lhs:?} and {rhs:?}", op = stringify!($op)),
                         }
-                    }), fdata_rhs)
+                    })
                 } else {
-                    (Box::new(move |ec: &mut ExecutionContext| {
+                    Box::new(move |ec: &mut ExecutionContext| {
                         let lhs = ec.run_lambda_trampoline(&evaluate_lhs);
                         let rhs = ec.run_lambda_trampoline(&evaluate_rhs);
 
                         return Value::Bool(lhs $op rhs);
-                    }), fdata_rhs)
+                    })
                 }
             };
         }
 
         match op {
-            BinaryOp::Add => (Box::new(move |ec: &mut ExecutionContext| {
+            BinaryOp::Add => Box::new(move |ec: &mut ExecutionContext| {
                 ec.binop_add(&evaluate_lhs, &evaluate_rhs)
-            }), fdata_rhs),
+            }),
             BinaryOp::Sub => int_binary_numeric_op!(-),
-            BinaryOp::Mul => int_binary_numeric_op!(*),
+            BinaryOp::Mul => Box::new(move |ec: &mut ExecutionContext| {
+                ec.binop_mul(&evaluate_lhs, &evaluate_rhs)
+            }),
             BinaryOp::Div => int_binary_numeric_op!(/),
             BinaryOp::Rem => int_binary_numeric_op!(%),
             BinaryOp::Eq => binary_comparison_op!(==),
@@ -1539,22 +1440,26 @@ impl LambdaCompiler {
             BinaryOp::Gt => binary_comparison_op!(>),
             BinaryOp::Lte => binary_comparison_op!(<=),
             BinaryOp::Gte => binary_comparison_op!(>=),
-            BinaryOp::And => (Box::new(move |ec: &mut ExecutionContext| {
+            BinaryOp::And => Box::new(move |ec: &mut ExecutionContext| {
                 let lhs = ec.run_lambda_trampoline(&evaluate_lhs);
                 let rhs = ec.run_lambda_trampoline(&evaluate_rhs);
                 match (&lhs, &rhs) {
                     (Value::Bool(lhs), Value::Bool(rhs)) => Value::Bool(*lhs && *rhs),
                     _ => panic!("Type error: Cannot apply binary operator && (and) on these values: {lhs:?} and {rhs:?}"),
                 }
-            }), fdata_rhs),
-            BinaryOp::Or => (Box::new(move |ec: &mut ExecutionContext| {
+            }),
+            BinaryOp::Or => Box::new(move |ec: &mut ExecutionContext| {
                 let lhs = ec.run_lambda_trampoline(&evaluate_lhs);
                 let rhs = ec.run_lambda_trampoline(&evaluate_rhs);
                 match (&lhs, &rhs) {
                     (Value::Bool(lhs), Value::Bool(rhs)) => Value::Bool(*lhs || *rhs),
                     _ => panic!("Type error: Cannot apply binary operator || (or) on these values: {lhs:?} and {rhs:?}"),
                 }
-            }), fdata_rhs)
+            }),
         }
     }
+}
+
+fn as_ref_slice(v: &[Expr]) -> Vec<&Expr> {
+    v.iter().collect()
 }
