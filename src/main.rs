@@ -110,7 +110,7 @@ fn program() -> miette::Result<()> {
         let hir = hir::ast_to_hir(file.expression);
         let program = compiler.compile(hir);
         let mut ee = lambda_compiler::ExecutionContext::new(&program);
-        (program.main)(&mut ee);
+        (program.main.body)(&mut ee);
 
     } else {
      
@@ -129,7 +129,7 @@ fn program() -> miette::Result<()> {
         let mut ee = lambda_compiler::ExecutionContext::new(&program);
     
         let start = std::time::Instant::now();
-        (program.main)(&mut ee);
+        (program.main.body)(&mut ee);
         let end = std::time::Instant::now();
         println!("Run Time: {:?}", end - start);
     

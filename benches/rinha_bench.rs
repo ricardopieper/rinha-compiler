@@ -9,12 +9,12 @@ fn compile(text: &str) -> CompilationResult {
 
     let compiler = LambdaCompiler::new();
     let hir = ast_to_hir(file.expression);
-    let program = compiler.compile(hir);
+    
 
-    return program;
+    compiler.compile(hir)
 }
 
-const PERF_PROGRAM: &'static str = "
+const PERF_PROGRAM: &str = "
 let iter = fn (from, to, call, prev) => {
   if (from < to) {
     let res = call(from);
@@ -41,7 +41,7 @@ iter(0, 100, work, 0)
 
 
 
-const FIB_30: &'static str = "
+const FIB_30: &str = "
 let fib = fn (n) => {
   if (n < 2) {
     n
@@ -57,7 +57,7 @@ pub fn criterion_benchmark(c: &mut Criterion) {
     let mut group = c
       .benchmark_group("rinha-bench");
     group.sample_size(40);
-    group.bench_with_input(
+  /*  group.bench_with_input(
         BenchmarkId::new("rinha-bench", "iterative"),
         &PERF_PROGRAM,
         |b, &program| {
@@ -65,19 +65,19 @@ pub fn criterion_benchmark(c: &mut Criterion) {
 
             b.iter(|| {
                 let mut ec = ExecutionContext::new(&compiled);
-                (compiled.main)(&mut ec);
+                (compiled.main.body)(&mut ec);
             });
         },
-    );
+    ); */
     group.bench_with_input(
       BenchmarkId::new("rinha-bench-fib", "fib30"),
       &FIB_30,
       |b, &program| {
-          let compiled = compile(&program);
+          let compiled = compile(program);
 
           b.iter(|| {
               let mut ec = ExecutionContext::new(&compiled);
-              (compiled.main)(&mut ec);
+              (compiled.main.body)(&mut ec);
           });
       },
   );
@@ -87,7 +87,7 @@ fn main(){
     
   // make Criterion listen to command line arguments
   let mut c = Criterion::default().configure_from_args();
-  let str_unix_time = std::time::SystemTime::now()
+  let _str_unix_time = std::time::SystemTime::now()
     .duration_since(std::time::UNIX_EPOCH)
     .unwrap()
     .as_secs()

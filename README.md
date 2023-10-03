@@ -21,3 +21,9 @@ Otimizações implementadas:
 --------------------------
 
 Verifique o arquivo Optimizations.md dentro de `/src`.
+
+Pendências:
+-----------
+
+ - Possível confusão entre functions com mesmo nome mas em escopos diferentes, adicionar namespaces
+ - `.leak()` desnecessarios, talvez todos eles...

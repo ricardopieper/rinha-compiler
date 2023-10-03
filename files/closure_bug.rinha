@@ -1,5 +1,5 @@
 let empty_env = fn(v) => {
-    (ValErr, "undefined variable " + v)
+    ("ValErr", "undefined variable " + v)
 };
 
 let bind = fn(var, val, env) => {

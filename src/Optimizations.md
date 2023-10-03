@@ -132,6 +132,76 @@ For every callable we will store the function layout, which is a table containin
 When we compile it, we just read the stack section and interpret it as a value.
 
 When we call a function, we evaluate the arguments and copy it into their respective positions for the called function.
-For closures, we kind of already do this. We build a closure and copy them onto the closure data.
-
 For TCO, we will be reusing the frame, so in those cases it should be a big win.
+
+For closures, we kind of already do this. We build a closure and copy them onto the closure data.
+But this copying of closure data is now challenging: We're essentially back to a stack of values approach,
+so no more global symbols where each one is tracked individually.
+
+f = 1;
+
+let work = fn(x) => {
+  let work_closure = fn(y) => {
+    let xx = x * y;
+    let tupl = (xx, x);
+    let f = first(tupl);
+    let s = second(tupl);
+    f * (s + f)
+  };
+  f = 2;
+  iter(0, 2000, work_closure, 0)
+};
+
+in this case, when we construct work_closure, we have to construct its closure environment. What if this process was not dynamic, but instead also a precompiled step?
+
+This is the idea of a Closure Builder:
+
+ - Each function has its own closure space, which is a vec where we save the closure data.
+ - This means the callable carries information into how much closure space it needs
+ - We need to handle a copy from closure to closure
+ - During compilation we detect when a var load comes from a closure
+
+
+The #0 root function has a closure space of 0, an empty closure.
+
+When I create the work function, the only variable in its immediate body not found in params is iter, but that's just a function call so we can optimize it away.
+
+When I create work_closure, it needs x and f. X is found first in its source code, then f, so we put them in the order we found them.
+
+This means work_closure is defined as: {
+    name: work_closure
+    let_bindings_so_far: [xx, tupl, f, s]
+    parameters: [y]
+    closure: [Symbol(x), Symbol(f)]
+}
+
+So we're finished compiling work_closure. The Var statement will simply load the closure value located in its closure space.
+
+Now we need to finish compiling work.
+WE see that when we compiled a function, it required closing over x and f. the f = 2 has no effect on the closure, it will have to be 1.
+We have to analyze how to construct this closure by looking into how can *we* have access to it.
+
+The first x is simply a param load, and the second f will be a closure load.... which requires us also allocating that f closure space for ourselves.
+...which means the closure space for work is: [f]
+
+
+Therefore work is defined as: {
+    name: work
+    let_bindings_so_far: [f] (because we write to it, but we write in our own scope!),
+    parameters: [x],
+    closure: [Symbol(f)]
+}
+
+
+After we compile a function and allocate the appropriate closure space, we chain functions, each one that loads the value fro the specified symbol...
+but since it's precompiled we just load from the specified location and store it in the closure space.
+
+
+
+
+
+
+
+
+
+

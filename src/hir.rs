@@ -49,6 +49,10 @@ pub enum Expr {
         func: Box<Expr>,
         args: Vec<Expr>,
     },
+    TrampolineCall {
+        func: Box<Expr>,
+        args: Vec<Expr>,
+    },
     BinOp {
         op: BinaryOp,
         left: Box<Expr>,
@@ -80,7 +84,7 @@ pub fn ast_to_hir(ast: Term) -> Vec<Expr> {
                     args,
                 }, None)
             }
-            Term::Binary(Binary { lhs, rhs, op, .. }) => (binop_hir(lhs, rhs, op), None),
+            Term::Binary(Binary { lhs, rhs, op, .. }) => (binop_hir(*lhs, *rhs, op), None),
             Term::Function(Function {
                 parameters, value, ..
             }) => {
@@ -173,12 +177,12 @@ pub fn ast_to_hir(ast: Term) -> Vec<Expr> {
 }
 
 fn binop_hir(
-    lhs: Box<Term>,
-    rhs: Box<Term>,
+    lhs: Term,
+    rhs: Term,
     op: BinaryOp,
 ) -> Expr {
-    let lhs = ast_to_hir(*lhs).pop().unwrap();
-    let rhs = ast_to_hir(*rhs).pop().unwrap();
+    let lhs = ast_to_hir(lhs).pop().unwrap();
+    let rhs = ast_to_hir(rhs).pop().unwrap();
     Expr::BinOp {
         op,
         left: lhs.into(),
