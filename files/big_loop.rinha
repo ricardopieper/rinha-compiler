@@ -5,4 +5,4 @@ let loop = fn (i, s) => {
       loop(i-1, s+1)
    }
 };
-print(loop(40000000, 0))F
+print(loop(33333333, 0))

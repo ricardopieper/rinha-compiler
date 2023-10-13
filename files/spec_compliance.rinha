@@ -242,5 +242,18 @@ let fib = fn (n) => {
 
 let _ = assert_eq(fib(15), 610);
 
+let _ = print("Testing closure behavior on recursive call");
+
+let y = 100;
+let x = fn(j) => { 
+    if (j == 0) {
+        1
+    } else { 
+        x(j-1) * y 
+    } 
+};
+
+let _ = assert_eq(x(3), 1000000);
+
 
 0

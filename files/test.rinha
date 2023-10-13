@@ -1,2 +1,9 @@
-let x = 42;
-print(x * 2 + 3)
+let y = 100;
+let x = fn(j) => { 
+    if (j == 0) {
+        1
+    } else { 
+        x(j-1) * y 
+    } 
+};
+print(x(11) * 9999)

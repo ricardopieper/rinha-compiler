@@ -1,0 +1,13 @@
+let eval = fn(e) => {
+    if (e <= 1) {
+        e
+    } else {
+        let rec = fn() => {
+            eval(1) + e + 10
+        };
+        rec
+    }
+};
+let x = eval(5);
+
+print(x())

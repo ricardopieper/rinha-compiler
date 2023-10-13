@@ -1,7 +1,8 @@
 use criterion::{BenchmarkId, Criterion};
 use lambda_rinha::{
+    hir::ast_to_hir,
     lambda_compiler::{CompilationResult, ExecutionContext, LambdaCompiler},
-    parser, hir::ast_to_hir,
+    parser,
 };
 
 fn compile(text: &str) -> CompilationResult {
@@ -9,7 +10,6 @@ fn compile(text: &str) -> CompilationResult {
 
     let compiler = LambdaCompiler::new();
     let hir = ast_to_hir(file.expression);
-    
 
     compiler.compile(hir)
 }
@@ -36,10 +36,10 @@ let work = fn(x) => {
   iter(0, 200, work_closure, 0)
 };
 
-iter(0, 100, work, 0)
+let iteration = iter(0, 100, work, 0);
+
+print(iteration)
 ";
-
-
 
 const FIB_30: &str = "
 let fib = fn (n) => {
@@ -53,11 +53,9 @@ print (\"fib\" + fib(30))
 ";
 
 pub fn criterion_benchmark(c: &mut Criterion) {
-
-    let mut group = c
-      .benchmark_group("rinha-bench");
+    let mut group = c.benchmark_group("rinha-bench");
     group.sample_size(40);
-  /*  group.bench_with_input(
+    group.bench_with_input(
         BenchmarkId::new("rinha-bench", "iterative"),
         &PERF_PROGRAM,
         |b, &program| {
@@ -68,32 +66,30 @@ pub fn criterion_benchmark(c: &mut Criterion) {
                 (compiled.main.body)(&mut ec);
             });
         },
-    ); */
+    );
     group.bench_with_input(
-      BenchmarkId::new("rinha-bench-fib", "fib30"),
-      &FIB_30,
-      |b, &program| {
-          let compiled = compile(program);
+        BenchmarkId::new("rinha-bench-fib", "fib30"),
+        &FIB_30,
+        |b, &program| {
+            let compiled = compile(program);
 
-          b.iter(|| {
-              let mut ec = ExecutionContext::new(&compiled);
-              (compiled.main.body)(&mut ec);
-          });
-      },
-  );
+            b.iter(|| {
+                let mut ec = ExecutionContext::new(&compiled);
+                (compiled.main.body)(&mut ec);
+            });
+        },
+    );
 }
 
-fn main(){
-    
-  // make Criterion listen to command line arguments
-  let mut c = Criterion::default().configure_from_args();
-  let _str_unix_time = std::time::SystemTime::now()
-    .duration_since(std::time::UNIX_EPOCH)
-    .unwrap()
-    .as_secs()
-    .to_string();
-  //let mut c = c.save_baseline(str_unix_time);
+fn main() {
+    // make Criterion listen to command line arguments
+    let mut c = Criterion::default().configure_from_args();
+    let _str_unix_time = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
+        .to_string();
+    //let mut c = c.save_baseline(str_unix_time);
 
-  criterion_benchmark(&mut c);
-
+    criterion_benchmark(&mut c);
 }

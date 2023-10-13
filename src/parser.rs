@@ -2,7 +2,6 @@ use crate::ast::{Element, Location};
 
 use miette::{NamedSource, SourceSpan};
 
-
 /// A name reference or definition in the source code.
 ///
 /// It's useful to know the location of the name in the source code
@@ -171,7 +170,7 @@ fn fmt_expected(expected: &[String]) -> String {
 /// lot of sub-errors.
 pub fn parse_or_report(filename: &str, text: &str) -> Result<crate::ast::File, ParseError> {
     let mut errors = vec![];
-    
+
     let ast = match crate::rinha::FileParser::new().parse(&mut errors, filename, text) {
         Ok(ast) => ast,
         Err(error) => {

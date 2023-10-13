@@ -2,11 +2,10 @@
 #![feature(iter_collect_into)]
 use lalrpop_util::lalrpop_mod;
 
+pub mod ast;
 pub mod hir;
 pub mod lambda_compiler;
-pub mod ast;
 pub mod parser;
-
 
 // The lalrpop module, it does generate the parser and lexer
 // for the language.

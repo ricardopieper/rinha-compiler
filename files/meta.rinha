@@ -57,7 +57,11 @@ let ExpLambda = "ExpLambda"; // Var Exp
 let ExpLet =  "ExpLet"; // Var Exp Exp
 
 let eval = fn(exp, env) => {
+    let _ = print("Called eval! Here's the value");
+    let _ = print(exp);
     let kind = first(exp);
+    let _ = print("Kind was bound");
+    let _ = print("Kind is " + kind);
     let data = second(exp);
     
     if (kind == ExpK) {
@@ -65,7 +69,6 @@ let eval = fn(exp, env) => {
     } else {
 
     if (kind == ExpVar) {
-        // second(env(data))()
         //env(data)
         let x = env(data);
         if (first(x) == ValLazy) {
@@ -76,30 +79,39 @@ let eval = fn(exp, env) => {
     } else {
 
     if (kind == ExpAdd) {
+        let _ = print("Eval ExpAdd");
         let lhs = eval(first(data), env);
         let rhs = eval(second(data), env);
         bin_op(sum, lhs, rhs)
     } else {
 
     if (kind == ExpSub) {
+        let _ = print("Eval ExpSub");
+
         let lhs = eval(first(data), env);
         let rhs = eval(second(data), env);
         bin_op(sub, lhs, rhs)
     } else {
 
     if (kind == ExpMul) {
+        let _ = print("Eval ExpMul");
+
         let lhs = eval(first(data), env);
         let rhs = eval(second(data), env);
         bin_op(mul, lhs, rhs)
     } else {
 
     if (kind == ExpDiv) {
+        let _ = print("Eval ExpDiv");
+
         let lhs = eval(first(data), env);
         let rhs = eval(second(data), env);
         bin_op(div, lhs, rhs)
     } else {
 
     if (kind == ExpIf) {
+        let _ = print("Eval ExpIf");
+
         let cond = first(data);
         let blocks = second(data);
         let then = first(blocks);
@@ -118,6 +130,8 @@ let eval = fn(exp, env) => {
     } else {
 
     if (kind == ExpApp) {
+        let _ = print("Eval ExpApp");
+
         let val_func = eval(first(data), env);
         if (first(val_func) == ValFunc) {
             let f = second(val_func);
@@ -133,17 +147,24 @@ let eval = fn(exp, env) => {
     } else {
 
     if (kind == ExpLambda) {
+        let _ = print("Eval ExpLambda");
+
         let param = first(data);
         let body = second(data);
         (ValFunc, (param, (body, env)))
     } else {
+    let _ = print("Eval ExpLet");
 
     // ExpLet
     let var = first(data);
     let value = first(second(data));
 
     let rec = fn() => {
+        let _ = print("Eval Rec");
+
         let rec_env = bind(var, (ValLazy, rec), env);
+        let _ = print("Eval on rec is");
+        let _ = print(eval);
         eval(value, rec_env)
     };
 
