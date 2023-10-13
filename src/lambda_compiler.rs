@@ -1,3 +1,4 @@
+use dyn_stack::DynStack;
 use smallvec::SmallVec;
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::ops::{Index, IndexMut};
@@ -6,7 +7,7 @@ use crate::ast::BinaryOp;
 
 use crate::hir::{Expr, FuncDecl};
 
-pub type LambdaFunction = Box<dyn Fn(&mut ExecutionContext) -> Value>;
+pub type LambdaFunction = Box<dyn Fn(&mut ExecutionContext, &mut CallFrame) -> Value>;
 
 pub type ClosureStorage = SmallVec<[Value; 4]>;
 
@@ -72,6 +73,7 @@ impl Value {
 }
 
 pub struct StackData {
+    //@TODO replace by actual stack
     backing_store: Vec<Value>,
 }
 
@@ -108,7 +110,7 @@ impl IndexMut<StackPosition> for StackData {
     }
 }
 
-pub struct StackFrame {
+pub struct CallFrame {
     function: usize,
     pub closure_ptr: ClosurePointer,
     pub tco_reuse_frame: bool,
@@ -118,7 +120,7 @@ pub struct StackFrame {
 #[derive(Clone, Copy, Debug, Eq, PartialEq, PartialOrd, Ord)]
 pub struct StackPosition(usize);
 
-type ClosureBuilder = Box<dyn Fn(&mut ExecutionContext) -> ClosureStorage>;
+type ClosureBuilder = Box<dyn Fn(&mut ExecutionContext, &mut CallFrame) -> ClosureStorage>;
 
 pub struct Callable {
     pub name: Option<Symbol>,
@@ -219,11 +221,11 @@ impl FunctionData {
                 lambdas.push(compiled);
             }
             let leaked_lambdas: &'static [LambdaFunction] = lambdas.leak();
-            let builder: Box<dyn Fn(&mut ExecutionContext) -> ClosureStorage> =
-                Box::new(move |ec: &mut ExecutionContext| {
+            let builder: ClosureBuilder =
+                Box::new(move |ec: &mut ExecutionContext, frame: &mut CallFrame| {
                     let mut vec = ClosureStorage::new();
                     for l in leaked_lambdas {
-                        vec.push(ec.run_lambda_trampoline(l));
+                        vec.push(ec.run_lambda_trampoline(l, frame));
                     }
                     vec
                 });
@@ -234,14 +236,14 @@ impl FunctionData {
 }
 
 pub struct ExecutionContext<'a> {
-    pub call_stack: Vec<StackFrame>,
+    // pub call_stack: Vec<CallFrame>,
+    //pub stack: DynStack<'s>,
     pub functions: &'a [Callable],
-    pub enable_memoization: bool,
+    pub reusable_frames: Vec<StackData>,
     //First vec represents the variable itself (there's only a set number of possible values),
     //second vec represents the stack frame's value of that variable
     //pub let_bindings: Vec<Vec<Value>>,
-    pub arg_eval_buffer: Vec<Vec<Value>>,
-    pub reusable_frames: Vec<StackFrame>,
+    //pub reusable_frames: Vec<StackFrame>,
     //this SmallVec in ClosureStorage is for performance, I just don't know how to reuse closure vecs...
     //And I think reusing a vec is actually faster, but for now this will have to suffice.
     pub closure_environments: Vec<ClosureStorage>,
@@ -275,8 +277,9 @@ enum TailRecursivity {
     NotTailRecursive,
 }
 
+//Using dynstack to store closure values, frame data, etc.
 impl<'a> ExecutionContext<'a> {
-    pub fn new(program: &'a CompilationResult) -> Self {
+    pub fn new(program: &'a CompilationResult) -> (Self, CallFrame) {
         //whenever we want an empty closure, we'll access by the function index into closures without allocating a new one
         let empty_closures = {
             let mut closures = vec![];
@@ -297,48 +300,23 @@ impl<'a> ExecutionContext<'a> {
             vec.reset(program.main.layout.len());
             vec
         };
-        Self {
-            call_stack: vec![StackFrame {
+        (
+            Self {
+                reusable_frames: vec![],
+                functions: &program.functions,
+                closure_environments: vec![],
+                heap: vec![],
+                string_values: program.strings.clone(),
+                tuples: vec![],
+                closures: empty_closures,
+            },
+            CallFrame {
                 function: usize::MAX,
                 closure_ptr: ClosurePointer(u32::MAX),
                 tco_reuse_frame: false,
                 stack_data: initial_stack,
-            }],
-            arg_eval_buffer: vec![],
-            functions: &program.functions,
-            enable_memoization: true,
-            //let_bindings: let_bindings,
-            reusable_frames: vec![],
-            closure_environments: vec![],
-            heap: vec![],
-            string_values: program.strings.clone(),
-            tuples: vec![],
-            closures: empty_closures,
-        }
-    }
-
-    pub fn disable_memoization(&mut self) {
-        self.enable_memoization = false;
-    }
-
-    #[inline(always)]
-    pub fn frame_mut(&mut self) -> &mut StackFrame {
-        self.call_stack.last_mut().unwrap()
-    }
-
-    #[inline(always)]
-    pub fn frame(&self) -> &StackFrame {
-        self.call_stack.last().unwrap()
-    }
-
-    #[inline(always)]
-    pub fn pop_frame(&mut self) -> StackFrame {
-        self.call_stack.pop().unwrap()
-    }
-
-    #[inline(always)]
-    pub fn push_frame(&mut self, frame: StackFrame) {
-        self.call_stack.push(frame);
+            },
+        )
     }
 
     #[inline(always)]
@@ -347,12 +325,16 @@ impl<'a> ExecutionContext<'a> {
     }
 
     #[inline(always)]
-    fn eval_closure_with_env(&mut self, callable_index: usize) -> ClosurePointer {
+    fn eval_closure_with_env(
+        &mut self,
+        callable_index: usize,
+        frame: &mut CallFrame,
+    ) -> ClosurePointer {
         let function = self.functions.get(callable_index).unwrap();
 
         if let Some(builder) = &function.closure_builder {
             let current_id = self.closure_environments.len();
-            let vec = builder(self);
+            let vec = builder(self, frame);
             self.closure_environments.push(vec);
 
             let closure = Closure {
@@ -368,12 +350,16 @@ impl<'a> ExecutionContext<'a> {
     }
 
     #[inline(always)]
-    fn eval_closure_with_env_trapolined(&mut self, callable_index: usize) -> ClosurePointer {
+    fn eval_closure_with_env_trapolined(
+        &mut self,
+        callable_index: usize,
+        frame: &mut CallFrame,
+    ) -> ClosurePointer {
         let function = self.functions.get(callable_index).unwrap();
 
         if let Some(builder) = &function.closure_builder {
             let current_id = self.closure_environments.len();
-            let vec = builder(self);
+            let vec = builder(self, frame);
             self.closure_environments.push(vec);
 
             let closure = Closure {
@@ -394,9 +380,14 @@ impl<'a> ExecutionContext<'a> {
     }
 
     #[inline(always)]
-    fn eval_let(&mut self, evaluate_value: &LambdaFunction, stack_pos: StackPosition) -> Value {
-        let bound_value = self.run_lambda_trampoline(evaluate_value);
-        self.frame_mut().stack_data[stack_pos] = bound_value;
+    fn eval_let(
+        &mut self,
+        evaluate_value: &LambdaFunction,
+        stack_pos: StackPosition,
+        frame: &mut CallFrame,
+    ) -> Value {
+        let bound_value = self.run_lambda_trampoline(evaluate_value, frame);
+        frame.stack_data[stack_pos] = bound_value;
         Value::None
     }
 
@@ -406,11 +397,12 @@ impl<'a> ExecutionContext<'a> {
         evaluate_condition: &LambdaFunction,
         evaluate_then: &LambdaFunction,
         evaluate_otherwise: &LambdaFunction,
+        frame: &mut CallFrame,
     ) -> Value {
-        let condition_result = self.run_lambda_trampoline(evaluate_condition);
+        let condition_result = self.run_lambda_trampoline(evaluate_condition, frame);
         match condition_result {
-            Value::Bool(true) => evaluate_then(self),
-            Value::Bool(false) => evaluate_otherwise(self),
+            Value::Bool(true) => evaluate_then(self, frame),
+            Value::Bool(false) => evaluate_otherwise(self, frame),
             _ => {
                 panic!("Type error: Cannot evaluate condition on this value: {condition_result:?}")
             }
@@ -418,9 +410,14 @@ impl<'a> ExecutionContext<'a> {
     }
 
     #[inline(always)]
-    fn binop_add(&mut self, evaluate_lhs: &LambdaFunction, evaluate_rhs: &LambdaFunction) -> Value {
-        let lhs = self.run_lambda_trampoline(evaluate_lhs);
-        let rhs = self.run_lambda_trampoline(evaluate_rhs);
+    fn binop_add(
+        &mut self,
+        evaluate_lhs: &LambdaFunction,
+        evaluate_rhs: &LambdaFunction,
+        frame: &mut CallFrame,
+    ) -> Value {
+        let lhs = self.run_lambda_trampoline(evaluate_lhs, frame);
+        let rhs = self.run_lambda_trampoline(evaluate_rhs, frame);
         match (&lhs, &rhs) {
             (Value::Int(lhs), Value::Int(rhs)) => Value::Int(lhs + rhs),
             (Value::Int(lhs), Value::Bool(rhs)) => Value::Int(lhs + *rhs as i32),
@@ -437,20 +434,21 @@ impl<'a> ExecutionContext<'a> {
         }
     }
 
-
     #[inline(always)]
     fn fastcall(
         &mut self,
         callee_function: ClosurePointer,
-        arguments: &[LambdaFunction]
+        arguments: &[LambdaFunction],
+        frame: &mut CallFrame,
     ) -> Value {
         let ClosurePointer(p) = callee_function;
 
         let Closure { callable_index, .. } = self.closures[p as usize];
-        self.make_new_frame(callable_index, ClosurePointer(p), arguments);
+        let mut new_frame =
+            self.make_new_frame(callable_index, ClosurePointer(p), arguments, frame);
 
         let function = &self.functions[callable_index].body;
-        let function_result = function(self);
+        let function_result = function(self, &mut new_frame);
 
         if let Value::Trampoline(ClosurePointer(p)) = &function_result {
             //if the trampoline returned is not for ourselves, then we evaluate it
@@ -460,12 +458,13 @@ impl<'a> ExecutionContext<'a> {
                 ..
             } = closure;
             if *trampoline_callable_index != callable_index {
-                self.run_trampoline(function_result)
+                //should this run in the current or new frame?
+                self.run_trampoline(function_result, &mut new_frame)
             } else {
                 function_result
             }
         } else {
-            self.pop_frame_and_bindings();
+            self.reusable_frames.push(new_frame.stack_data);
             function_result
         }
     }
@@ -475,8 +474,9 @@ impl<'a> ExecutionContext<'a> {
         evaluate_callee: &LambdaFunction,
         arguments: &Vec<LambdaFunction>,
         called_name: &str,
+        frame: &mut CallFrame,
     ) -> Value {
-        let callee_function = evaluate_callee(self);
+        let callee_function = evaluate_callee(self, frame);
 
         let Value::Closure(ClosurePointer(p)) = callee_function else {
             panic!("Call to non-function value {called_name}: {callee_function:?}")
@@ -488,11 +488,12 @@ impl<'a> ExecutionContext<'a> {
             panic!("Wrong number of arguments for function {called_name}")
         }
 
-        self.make_new_frame(callable_index, ClosurePointer(p), arguments);
+        let mut new_frame =
+            self.make_new_frame(callable_index, ClosurePointer(p), arguments, frame);
 
         let function = &self.functions[callable_index].body;
 
-        let function_result = function(self);
+        let function_result = function(self, &mut new_frame);
 
         if let Value::Trampoline(ClosurePointer(p)) = &function_result {
             //if the trampoline returned is not for ourselves, then we evaluate it
@@ -502,45 +503,53 @@ impl<'a> ExecutionContext<'a> {
                 ..
             } = closure;
             if *trampoline_callable_index != callable_index {
-                self.run_trampoline(function_result)
+                self.run_trampoline(function_result, &mut new_frame)
             } else {
                 function_result
             }
         } else {
-            self.pop_frame_and_bindings();
+            //here the frame ends.
+            //we can reuse the stack data
+            self.reusable_frames.push(new_frame.stack_data);
             function_result
         }
     }
 
     #[inline(always)]
-    fn eval_trampoline(&mut self, callable_index: usize, arguments: &[LambdaFunction]) -> Value {
-        self.update_let_bindings_for_frame_reuse(arguments);
+    fn eval_trampoline(
+        &mut self,
+        callable_index: usize,
+        arguments: &[LambdaFunction],
+        frame: &mut CallFrame,
+    ) -> Value {
+        self.update_let_bindings_for_frame_reuse(arguments, frame);
         let function = &self.functions[callable_index].body;
-        function(self)
+        function(self, frame)
     }
 
     #[inline(always)]
-    fn update_let_bindings_for_frame_reuse(&mut self, arguments: &[LambdaFunction]) {
+    fn update_let_bindings_for_frame_reuse(
+        &mut self,
+        arguments: &[LambdaFunction],
+        frame: &mut CallFrame,
+    ) {
         for (i, arg) in arguments.iter().enumerate() {
-            let trampolined = self.run_lambda_trampoline(arg);
-            self.frame_mut().stack_data[StackPosition(i)] = trampolined;
+            let trampolined = self.run_lambda_trampoline(arg, frame);
+            frame.stack_data[StackPosition(i)] = trampolined;
         }
     }
 
     #[inline(always)]
-    pub fn run_trampoline(&mut self, maybe_trampoline: Value) -> Value {
+    pub fn run_trampoline(&mut self, maybe_trampoline: Value, frame: &mut CallFrame) -> Value {
         let mut current @ Value::Trampoline(..) = maybe_trampoline else {
             return maybe_trampoline;
         };
-        //the top of the stack here is the stack of the call on the first iteration
-        //which needs to be destroyed after the while loop
-        let num_stack_frames_before = self.call_stack.len();
 
         while let Value::Trampoline(ClosurePointer(p)) = current {
             let Closure { callable_index, .. } = self.closures[p as usize];
 
-            self.frame_mut().closure_ptr = ClosurePointer(p);
-            self.frame_mut().tco_reuse_frame = true;
+            frame.closure_ptr = ClosurePointer(p);
+            frame.tco_reuse_frame = true;
 
             //this needs to be the TCO obj itself
             // let callee = &self.functions[callable_index as usize];
@@ -561,33 +570,22 @@ impl<'a> ExecutionContext<'a> {
             //eval_call will run (because it's a *tail call optimization*), which will setup its own call stack.
             //however, we count how many stacks we pushed and pop them all later
 
-            current = function(self);
+            current = function(self, frame);
 
             //self.pop_frame_and_bindings();
-        }
-
-        let num_stack_frames_after = self.call_stack.len();
-
-        let num_created_stack_frames = num_stack_frames_after - num_stack_frames_before;
-        let num_frames_to_pop = num_created_stack_frames + 1; //includes the very first one, the reused frame
-
-        for _ in 0..num_frames_to_pop {
-            self.pop_frame_and_bindings();
         }
 
         current
     }
 
     #[inline(always)]
-    pub fn run_lambda_trampoline(&mut self, lambda: &LambdaFunction) -> Value {
-        let maybe_trampoline = lambda(self);
-        self.run_trampoline(maybe_trampoline)
-    }
-
-    #[inline(always)]
-    fn pop_frame_and_bindings(&mut self) {
-        let popped_frame = self.pop_frame();
-        self.reusable_frames.push(popped_frame);
+    pub fn run_lambda_trampoline(
+        &mut self,
+        lambda: &LambdaFunction,
+        frame: &mut CallFrame,
+    ) -> Value {
+        let maybe_trampoline = lambda(self, frame);
+        self.run_trampoline(maybe_trampoline, frame)
     }
 
     #[inline(always)]
@@ -596,44 +594,41 @@ impl<'a> ExecutionContext<'a> {
         callable_index: usize,
         closure_pointer: ClosurePointer,
         arguments: &[LambdaFunction],
-    ) {
+        current_frame: &mut CallFrame,
+    ) -> CallFrame {
         let callable = &self.functions[callable_index];
 
-        let mut new_frame = match self.reusable_frames.pop() {
-            Some(mut new_frame) => {
-                new_frame.function = callable_index;
-                new_frame.closure_ptr = closure_pointer;
-                new_frame.tco_reuse_frame = false;
-                new_frame.stack_data.reset(callable.layout.len());
-                new_frame
-            }
-            None => {
-                StackFrame {
-                    function: callable_index,
-                    stack_data: StackData::new(callable.layout.len()), // { backing_store: () },
-                    closure_ptr: closure_pointer,
-                    tco_reuse_frame: false,
-                }
-            }
+        let stack_data = if let Some(mut s) = self.reusable_frames.pop() {
+            s.reset(callable.layout.len());
+            s
+        } else {
+            StackData::new(callable.layout.len())
+        };
+
+        let mut new_frame = CallFrame {
+            function: callable_index,
+            stack_data, // { backing_store: () },
+            closure_ptr: closure_pointer,
+            tco_reuse_frame: false,
         };
 
         for (i, arg) in arguments.iter().enumerate() {
-            let trampolined = self.run_lambda_trampoline(arg);
+            let trampolined = self.run_lambda_trampoline(arg, current_frame);
             new_frame.stack_data[StackPosition(i)] = trampolined;
         }
 
-        self.push_frame(new_frame);
+        new_frame
     }
-
 
     #[inline(always)]
     fn eval_tuple(
         &mut self,
         evaluate_first: &LambdaFunction,
         evaluate_second: &LambdaFunction,
+        frame: &mut CallFrame,
     ) -> Value {
-        let f = self.run_lambda_trampoline(evaluate_first);
-        let s = self.run_lambda_trampoline(evaluate_second);
+        let f = self.run_lambda_trampoline(evaluate_first, frame);
+        let s = self.run_lambda_trampoline(evaluate_second, frame);
         match (f, s) {
             (Value::Int(a), Value::Int(b)) => {
                 //transform into i16 if in range
@@ -730,18 +725,17 @@ impl LambdaCompiler {
     }
 
     fn join_lambdas(&mut self, mut lambdas: Vec<LambdaFunction>) -> LambdaFunction {
-        
         if lambdas.len() == 1 {
-            return lambdas.pop().unwrap()
+            return lambdas.pop().unwrap();
         }
 
         let leaked: &'static [LambdaFunction] = lambdas.leak();
         if leaked.len() == 2 {
             let l0 = &leaked[0];
             let l1 = &leaked[1];
-            return Box::new(move |ec| {
-                l0(ec);
-                l1(ec)
+            return Box::new(move |ec, frame| {
+                l0(ec, frame);
+                l1(ec, frame)
             });
         }
 
@@ -749,10 +743,10 @@ impl LambdaCompiler {
             let l0 = &leaked[0];
             let l1 = &leaked[1];
             let l2 = &leaked[2];
-            return Box::new(move |ec| {
-                l0(ec);
-                l1(ec);
-                l2(ec)
+            return Box::new(move |ec, frame| {
+                l0(ec, frame);
+                l1(ec, frame);
+                l2(ec, frame)
             });
         }
 
@@ -761,23 +755,37 @@ impl LambdaCompiler {
             let l1 = &leaked[1];
             let l2 = &leaked[2];
             let l3 = &leaked[3];
-            return Box::new(move |ec| {
-                l0(ec);
-                l1(ec);
-                l2(ec);
-                l3(ec)
+            return Box::new(move |ec, frame| {
+                l0(ec, frame);
+                l1(ec, frame);
+                l2(ec, frame);
+                l3(ec, frame)
             });
         }
 
-        return Box::new(move |ec| {
+        if leaked.len() == 5 {
+            let l0 = &leaked[0];
+            let l1 = &leaked[1];
+            let l2 = &leaked[2];
+            let l3 = &leaked[3];
+            let l4 = &leaked[4];
+            return Box::new(move |ec, frame| {
+                l0(ec, frame);
+                l1(ec, frame);
+                l2(ec, frame);
+                l3(ec, frame);
+                l4(ec, frame)
+            });
+        }
+
+        return Box::new(move |ec, frame| {
             let mut last = None;
             for l in leaked {
-                last = Some(l(ec));
+                last = Some(l(ec, frame));
             }
             last.unwrap()
         });
     }
-
 
     fn compile_body(
         &mut self,
@@ -795,7 +803,7 @@ impl LambdaCompiler {
 
         let joined = self.join_lambdas(lambdas);
 
-        return (joined, current_fdata);       
+        return (joined, current_fdata);
     }
 
     fn compile_internal(
@@ -810,15 +818,16 @@ impl LambdaCompiler {
                     self.compile_internal(*value, function_data, current_let);
                 //because the type of the expression is only known at runtime, we have to check it in the print function during runtime :(
                 (
-                    Box::new(move |ec: &mut ExecutionContext| {
-                        let value_to_print = ec.run_lambda_trampoline(&evaluate_printed_value);
+                    Box::new(move |ec: &mut ExecutionContext, frame: &mut CallFrame| {
+                        let value_to_print =
+                            ec.run_lambda_trampoline(&evaluate_printed_value, frame);
                         println!("{}", value_to_print.to_string(ec));
                         value_to_print
                     }),
                     fdata,
                 )
             }
-            Expr::Int { value } => (Box::new(move |ec| ec.eval_int(value)), function_data),
+            Expr::Int { value } => (Box::new(move |ec, frame| ec.eval_int(value)), function_data),
             Expr::Var { name, .. } => {
                 let varname: &'static str = name.leak();
                 let symbol = self.intern_var_name(varname);
@@ -842,8 +851,8 @@ impl LambdaCompiler {
                     let pos = function_data.get_variable_type(&var_index, self);
                     match pos {
                         VariableType::StackPosition(pos) => {
-                            (Box::new(move |ec: &mut ExecutionContext| {
-                                   ec.eval_let(&evaluate_value, pos)
+                            (Box::new(move |ec: &mut ExecutionContext, frame: &mut CallFrame| {
+                                   ec.eval_let(&evaluate_value, pos, frame)
                                }), function_data)
                         },
                         _ => panic!("Unexpected let binding position in closure or self ref, should be a position in the stack")
@@ -853,16 +862,16 @@ impl LambdaCompiler {
                     let name_interned = self.intern_var_name(&name);
                     let (evaluate_value, mut fdata) = self.compile_internal(*value,  function_data, Some(name_interned));
                     if name == "_" {
-                        (Box::new(move |ec: &mut ExecutionContext| {
-                            ec.run_lambda_trampoline(&evaluate_value) //we're only interested in the side effect of this
+                        (Box::new(move |ec: &mut ExecutionContext, frame: &mut CallFrame| {
+                            ec.run_lambda_trampoline(&evaluate_value, frame) //we're only interested in the side effect of this
                         }), fdata)
                     } else {
                         fdata.add_let_binding(name_interned);
                         let pos = fdata.get_variable_type(&name_interned, self);
                         match pos {
                             VariableType::StackPosition(pos) => {
-                                (Box::new(move |ec: &mut ExecutionContext| {
-                                       ec.eval_let(&evaluate_value, pos)
+                                (Box::new(move |ec: &mut ExecutionContext, frame: &mut CallFrame| {
+                                       ec.eval_let(&evaluate_value, pos, frame)
                                    }), fdata)
                             }
                             _ => panic!("Unexpected let binding position in closure or self ref, should be a position in the stack")
@@ -876,7 +885,7 @@ impl LambdaCompiler {
             Expr::String { value } => {
                 //let leaked: &'static str = value.leak();
                 (
-                    Box::new(move |ec| {
+                    Box::new(move |ec, frame| {
                         let current = ec.string_values.len();
                         ec.string_values.push(value.clone());
                         Value::Str(StringPointer(current as u32))
@@ -900,8 +909,8 @@ impl LambdaCompiler {
                         let args_leaked = arguments.leak();
 
                         return (
-                            Box::new(move |ec| {
-                                ec.fastcall(ec.frame().closure_ptr, args_leaked)
+                            Box::new(move |ec, frame| {
+                                ec.fastcall(frame.closure_ptr, args_leaked, frame)
                             }),
                             new_fdata,
                         );
@@ -925,8 +934,8 @@ impl LambdaCompiler {
 
                 let (arguments, new_fdata) = self.compile_lambda_list(&args, function_data);
                 (
-                    Box::new(move |ec: &mut ExecutionContext| {
-                        ec.eval_trampoline(callable_index, &arguments)
+                    Box::new(move |ec: &mut ExecutionContext, frame: &mut CallFrame| {
+                        ec.eval_trampoline(callable_index, &arguments, frame)
                     }),
                     new_fdata,
                 )
@@ -968,8 +977,13 @@ impl LambdaCompiler {
                 let (evaluate_otherwise, otherwise_fdata) =
                     self.compile_body(&otherwise.clone(), then_fdata);
                 (
-                    Box::new(move |ec: &mut ExecutionContext| {
-                        ec.eval_if(&evaluate_condition, &evaluate_then, &evaluate_otherwise)
+                    Box::new(move |ec: &mut ExecutionContext, frame: &mut CallFrame| {
+                        ec.eval_if(
+                            &evaluate_condition,
+                            &evaluate_then,
+                            &evaluate_otherwise,
+                            frame,
+                        )
                     }),
                     otherwise_fdata,
                 )
@@ -979,8 +993,8 @@ impl LambdaCompiler {
                 let (evaluate_value, first_fdata) =
                     self.compile_internal(*value, function_data, current_let);
                 (
-                    Box::new(move |ec: &mut ExecutionContext| {
-                        let value = ec.run_lambda_trampoline(&evaluate_value);
+                    Box::new(move |ec: &mut ExecutionContext, frame: &mut CallFrame| {
+                        let value = ec.run_lambda_trampoline(&evaluate_value, frame);
                         match value {
                             Value::Tuple(ptr) => {
                                 let (a, _) = &ec.tuples[ptr.0 as usize];
@@ -1003,8 +1017,8 @@ impl LambdaCompiler {
                 let (evaluate_value, second_fdata) =
                     self.compile_internal(*value, function_data, current_let);
                 (
-                    Box::new(move |ec: &mut ExecutionContext| {
-                        let value = ec.run_lambda_trampoline(&evaluate_value);
+                    Box::new(move |ec: &mut ExecutionContext, frame: &mut CallFrame| {
+                        let value = ec.run_lambda_trampoline(&evaluate_value, frame);
                         match value {
                             Value::Tuple(ptr) => {
                                 let (_, b) = &ec.tuples[ptr.0 as usize];
@@ -1024,15 +1038,15 @@ impl LambdaCompiler {
                     second_fdata,
                 )
             }
-            Expr::Bool { value, .. } => (Box::new(move |_| Value::Bool(value)), function_data),
+            Expr::Bool { value, .. } => (Box::new(move |_, _| Value::Bool(value)), function_data),
             Expr::Tuple { first, second, .. } => {
                 let (evaluate_first, first_fdata) =
                     self.compile_internal(*first, function_data, None);
                 let (evaluate_second, second_fdata) =
                     self.compile_internal(*second, first_fdata, None);
                 (
-                    Box::new(move |ec: &mut ExecutionContext| {
-                        ec.eval_tuple(&evaluate_first, &evaluate_second)
+                    Box::new(move |ec: &mut ExecutionContext, frame: &mut CallFrame| {
+                        ec.eval_tuple(&evaluate_first, &evaluate_second, frame)
                     }),
                     second_fdata,
                 )
@@ -1049,8 +1063,8 @@ impl LambdaCompiler {
         let (callee, arguments, _, called_name, call_fdata) =
             self.compile_call_data(&func, &args, function_data);
         (
-            Box::new(move |ec: &mut ExecutionContext| {
-                ec.eval_generic_call(&callee, &arguments, called_name)
+            Box::new(move |ec: &mut ExecutionContext, frame: &mut CallFrame| {
+                ec.eval_generic_call(&callee, &arguments, called_name, frame)
             }),
             call_fdata,
         )
@@ -1067,14 +1081,18 @@ impl LambdaCompiler {
             VariableType::Trampoline { .. } => {
                 panic!("Trampoline calls should be resolved at compile time on Expr::TrampolineCall compilation! This is a compiler bug");
             }
-            VariableType::RecursiveFunction { .. } => Box::new(move |ec: &mut ExecutionContext| {
-                let var = ec.frame().closure_ptr;
-                Value::Closure(var)
-            }),
-            VariableType::StackPosition(pos) => Box::new(move |ec: &mut ExecutionContext| {
-                let var = &ec.frame().stack_data;
-                var[pos]
-            }),
+            VariableType::RecursiveFunction { .. } => {
+                Box::new(move |ec: &mut ExecutionContext, frame: &mut CallFrame| {
+                    let var = frame.closure_ptr;
+                    Value::Closure(var)
+                })
+            }
+            VariableType::StackPosition(pos) => {
+                Box::new(move |ec: &mut ExecutionContext, frame: &mut CallFrame| {
+                    let var = &frame.stack_data;
+                    var[pos]
+                })
+            }
             VariableType::Closure => {
                 //need to find the index of this name in the closure
                 let mut found = function_data.closure.iter().position(|var| var == &symbol);
@@ -1083,8 +1101,8 @@ impl LambdaCompiler {
                     function_data.closure.push(symbol);
                 }
                 let closure_var_idx = found.unwrap();
-                Box::new(move |ec: &mut ExecutionContext| {
-                    let closure_env = ec.frame().closure_ptr;
+                Box::new(move |ec: &mut ExecutionContext, frame: &mut CallFrame| {
+                    let closure_env = frame.closure_ptr;
                     let Closure {
                         closure_env_index, ..
                     } = ec.closures[closure_env.0 as usize];
@@ -1215,7 +1233,7 @@ impl LambdaCompiler {
 
         let callable = Callable {
             name: current_let,
-            body: Box::new(|_| panic!("Empty body, function not compiled yet")),
+            body: Box::new(|_, _| panic!("Empty body, function not compiled yet")),
             //because recursive call checks will check for correct arg number so that we don't do it over and over and over and over and over....
             parameters: function_data.parameters.clone().leak(),
             //layout is TBD after the compilation finishes
@@ -1276,20 +1294,22 @@ impl LambdaCompiler {
         (
             if trampoline_of.is_none() {
                 if !callable.closure_vars.is_empty() {
-                    Box::new(move |ec: &mut ExecutionContext| {
-                        Value::Closure(ec.eval_closure_with_env(new_callable_index))
+                    Box::new(move |ec: &mut ExecutionContext, frame: &mut CallFrame| {
+                        Value::Closure(ec.eval_closure_with_env(new_callable_index, frame))
                     })
                 } else {
-                    Box::new(move |ec: &mut ExecutionContext| {
+                    Box::new(move |ec: &mut ExecutionContext, frame: &mut CallFrame| {
                         Value::Closure(ec.eval_closure_no_env(new_callable_index))
                     })
                 }
             } else if !callable.closure_vars.is_empty() {
-                Box::new(move |ec: &mut ExecutionContext| {
-                    Value::Trampoline(ec.eval_closure_with_env_trapolined(new_callable_index))
+                Box::new(move |ec: &mut ExecutionContext, frame: &mut CallFrame| {
+                    Value::Trampoline(
+                        ec.eval_closure_with_env_trapolined(new_callable_index, frame),
+                    )
                 })
             } else {
-                Box::new(move |ec: &mut ExecutionContext| {
+                Box::new(move |ec: &mut ExecutionContext, frame: &mut CallFrame| {
                     Value::Trampoline(ec.eval_closure_no_env(new_callable_index))
                 })
             },
@@ -1496,10 +1516,11 @@ impl LambdaCompiler {
 
         let function = self.join_lambdas(lambdas);
         //trampolinize the returned value
-        let trampolinized: LambdaFunction = Box::new(move |ec: &mut ExecutionContext| {
-            let result = function(ec);
-            ec.run_trampoline(result)
-        });
+        let trampolinized: LambdaFunction =
+            Box::new(move |ec: &mut ExecutionContext, frame: &mut CallFrame| {
+                let result = function(ec, frame);
+                ec.run_trampoline(result, frame)
+            });
 
         let mut function_layout = BTreeMap::new();
 
@@ -1637,8 +1658,8 @@ impl LambdaCompiler {
                 macro_rules! variable_int_binop {
                     ($op:tt, $operation_name:ident) => {
                         (
-                            Box::new(move |ec: &mut ExecutionContext| {
-                                let lhs = ec.run_lambda_trampoline(&index_lhs);
+                            Box::new(move |ec: &mut ExecutionContext, frame: &mut CallFrame| {
+                                let lhs = ec.run_lambda_trampoline(&index_lhs, frame);
                                 $operation_name!(lhs, int_value, ec, $op)
                             }),
                             lhs_fdata,
@@ -1656,8 +1677,8 @@ impl LambdaCompiler {
                 macro_rules! variable_int_binop {
                     ($op:tt, $operation_name:ident) => {
                         (
-                            Box::new(move |ec: &mut ExecutionContext| {
-                                let lhs = ec.run_lambda_trampoline(&index_lhs);
+                            Box::new(move |ec: &mut ExecutionContext, frame: &mut CallFrame| {
+                                let lhs = ec.run_lambda_trampoline(&index_lhs, frame);
                                 $operation_name!(lhs, bool_value, ec, $op)
                             }),
                             lhs_fdata,
@@ -1675,8 +1696,8 @@ impl LambdaCompiler {
                 macro_rules! variable_int_binop {
                     ($op:tt, $operation_name:ident) => {
                         (
-                            Box::new(move |ec: &mut ExecutionContext| {
-                                let rhs = ec.run_lambda_trampoline(&index_rhs);
+                            Box::new(move |ec: &mut ExecutionContext, frame: &mut CallFrame| {
+                                let rhs = ec.run_lambda_trampoline(&index_rhs, frame);
                                 $operation_name!(int_value, rhs, ec, $op)
                             }),
                             rhs_fdata,
@@ -1694,8 +1715,8 @@ impl LambdaCompiler {
                 macro_rules! variable_int_binop {
                     ($op:tt, $operation_name:ident) => {
                         (
-                            Box::new(move |ec: &mut ExecutionContext| {
-                                let rhs = ec.run_lambda_trampoline(&index_rhs);
+                            Box::new(move |ec: &mut ExecutionContext, frame: &mut CallFrame| {
+                                let rhs = ec.run_lambda_trampoline(&index_rhs, frame);
                                 $operation_name!(bool_value, rhs, ec, $op)
                             }),
                             rhs_fdata,
@@ -1713,7 +1734,7 @@ impl LambdaCompiler {
 
                 macro_rules! call_both_sides {
                     ($op:tt, $operation_name:ident) => {
-                        (Box::new(move |ec: &mut ExecutionContext| {
+                        (Box::new(move |ec: &mut ExecutionContext, frame: &mut CallFrame| {
                             let call_lhs = ec.eval_generic_call(&callee_lhs, &args_lhs, called_name_lhs);
                             let call_lhs = ec.run_trampoline(call_lhs);
 
@@ -1752,9 +1773,9 @@ impl LambdaCompiler {
 
         macro_rules! int_binary_numeric_op {
             ($op:tt) => {
-                (Box::new(move |ec: &mut ExecutionContext| {
-                    let lhs = ec.run_lambda_trampoline(&evaluate_lhs);
-                    let rhs = ec.run_lambda_trampoline(&evaluate_rhs);
+                (Box::new(move |ec: &mut ExecutionContext, frame: &mut CallFrame| {
+                    let lhs = ec.run_lambda_trampoline(&evaluate_lhs, frame);
+                    let rhs = ec.run_lambda_trampoline(&evaluate_rhs, frame);
                     match (&lhs, &rhs) {
                         (Value::Int(lhs), Value::Int(rhs)) => {
                             Value::Int(lhs $op rhs)
@@ -1769,9 +1790,9 @@ impl LambdaCompiler {
             ($op:tt) => {
 
                 if (self.strict_equals) {
-                    (Box::new(move |ec: &mut ExecutionContext| {
-                        let lhs = ec.run_lambda_trampoline(&evaluate_lhs);
-                        let rhs = ec.run_lambda_trampoline(&evaluate_rhs);
+                    (Box::new(move |ec: &mut ExecutionContext, frame: &mut CallFrame| {
+                        let lhs = ec.run_lambda_trampoline(&evaluate_lhs, frame);
+                        let rhs = ec.run_lambda_trampoline(&evaluate_rhs, frame);
 
                         match (&lhs, &rhs) {
                             (Value::Int(lhs), Value::Int(rhs)) => {
@@ -1789,9 +1810,9 @@ impl LambdaCompiler {
                         }
                     }), fdata_rhs)
                 } else {
-                    (Box::new(move |ec: &mut ExecutionContext| {
-                        let lhs = ec.run_lambda_trampoline(&evaluate_lhs);
-                        let rhs = ec.run_lambda_trampoline(&evaluate_rhs);
+                    (Box::new(move |ec: &mut ExecutionContext, frame: &mut CallFrame| {
+                        let lhs = ec.run_lambda_trampoline(&evaluate_lhs, frame);
+                        let rhs = ec.run_lambda_trampoline(&evaluate_rhs, frame);
 
                         return Value::Bool(lhs $op rhs);
                     }), fdata_rhs)
@@ -1801,8 +1822,8 @@ impl LambdaCompiler {
 
         match op {
             BinaryOp::Add => (
-                Box::new(move |ec: &mut ExecutionContext| {
-                    ec.binop_add(&evaluate_lhs, &evaluate_rhs)
+                Box::new(move |ec: &mut ExecutionContext, frame: &mut CallFrame| {
+                    ec.binop_add(&evaluate_lhs, &evaluate_rhs, frame)
                 }),
                 fdata_rhs,
             ),
@@ -1817,9 +1838,9 @@ impl LambdaCompiler {
             BinaryOp::Lte => binary_comparison_op!(<=),
             BinaryOp::Gte => binary_comparison_op!(>=),
             BinaryOp::And => (
-                Box::new(move |ec: &mut ExecutionContext| {
-                    let lhs = ec.run_lambda_trampoline(&evaluate_lhs);
-                    let rhs = ec.run_lambda_trampoline(&evaluate_rhs);
+                Box::new(move |ec: &mut ExecutionContext, frame: &mut CallFrame| {
+                    let lhs = ec.run_lambda_trampoline(&evaluate_lhs, frame);
+                    let rhs = ec.run_lambda_trampoline(&evaluate_rhs, frame);
                     match (&lhs, &rhs) {
                     (Value::Bool(lhs), Value::Bool(rhs)) => Value::Bool(*lhs && *rhs),
                     _ => panic!("Type error: Cannot apply binary operator && (and) on these values: {lhs:?} and {rhs:?}"),
@@ -1828,9 +1849,9 @@ impl LambdaCompiler {
                 fdata_rhs,
             ),
             BinaryOp::Or => (
-                Box::new(move |ec: &mut ExecutionContext| {
-                    let lhs = ec.run_lambda_trampoline(&evaluate_lhs);
-                    let rhs = ec.run_lambda_trampoline(&evaluate_rhs);
+                Box::new(move |ec: &mut ExecutionContext, frame: &mut CallFrame| {
+                    let lhs = ec.run_lambda_trampoline(&evaluate_lhs, frame);
+                    let rhs = ec.run_lambda_trampoline(&evaluate_rhs, frame);
                     match (&lhs, &rhs) {
                     (Value::Bool(lhs), Value::Bool(rhs)) => Value::Bool(*lhs || *rhs),
                     _ => panic!("Type error: Cannot apply binary operator || (or) on these values: {lhs:?} and {rhs:?}"),

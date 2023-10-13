@@ -196,12 +196,16 @@ Therefore work is defined as: {
 After we compile a function and allocate the appropriate closure space, we chain functions, each one that loads the value fro the specified symbol...
 but since it's precompiled we just load from the specified location and store it in the closure space.
 
+This optimization took it down to 2.0ms, and fib(30) runs in ~110ms. But this mostly revealed a bunch of bugs in the interpreter. The previous way of tracking vars 
+just made everything sort of "global" in a sense, so it just worked sometimes by luck, like recursive calls to closures (e.g. the `rec` function inside `eval` in `meta.rinha`). This new way requires more careful programming, but reveals bugs faster.
 
 
+16 - Lambda List Iteration
 
+When we made the compiler less recursive by having lists of expressions, we ended up doing loops inside lambdas which invoked the whole iter protocol.
+WHat happens when we detect special cases, like the body having only 1 item? What if we just execute it direclty without iter?
 
+The answer for perf.rinha is 2.0ms to 1.95ms, while fib has a massive gain of 110ms down to 77ms(!). 
+There is also big_loop.rinha that counts to 2 billion. It goes from 60s to 47s.
 
-
-
-
-
+I implemented for 2 items up to 5 but those don't seem to help too much in perf.rinha.

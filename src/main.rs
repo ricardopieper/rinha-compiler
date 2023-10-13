@@ -9,6 +9,8 @@ use crate::ast::File;
 use clap::Parser;
 use clap::ValueEnum;
 use lalrpop_util::lalrpop_mod;
+use lambda_compiler::CallFrame;
+use lambda_compiler::Value;
 use miette::IntoDiagnostic;
 use owo_colors::OwoColorize;
 use serde::Deserialize;
@@ -72,6 +74,10 @@ fn log(out: fern::FormatCallback, message: &std::fmt::Arguments, record: &log::R
     out.finish(format_args!("  {level:>7} {}", message))
 }
 
+use core::mem::MaybeUninit;
+use dyn_stack::{DynStack, StackReq};
+
+
 /// The main function of the program.
 fn program() -> miette::Result<()> {
     let start = std::time::Instant::now();
@@ -82,6 +88,12 @@ fn program() -> miette::Result<()> {
         bupropion::BupropionHandlerOpts::new()
     })
     .into_diagnostic()?;
+
+    /*let mut buf = [MaybeUninit::uninit();
+                    StackReq::new::<Value>(2000000)
+                        .unaligned_bytes_required()];
+
+    let mut stack = DynStack::new(&mut buf);*/
 
     // Initialize the logger
     fern::Dispatch::new() // Perform allocation-free log formatting
@@ -106,8 +118,9 @@ fn program() -> miette::Result<()> {
         let compiler = lambda_compiler::LambdaCompiler::new();
         let hir = hir::ast_to_hir(file.expression);
         let program = compiler.compile(hir);
-        let mut ee = lambda_compiler::ExecutionContext::new(&program);
-        (program.main.body)(&mut ee);
+        let (mut ee, mut initial_frame) = lambda_compiler::ExecutionContext::new(&program);
+     
+        (program.main.body)(&mut ee, &mut initial_frame);
     } else {
         let file = crate::parser::parse_or_report(&command.main, &file)?;
         let end = std::time::Instant::now();
@@ -121,10 +134,10 @@ fn program() -> miette::Result<()> {
         let end = std::time::Instant::now();
 
         println!("Compile Time: {:?}", end - start);
-        let mut ee = lambda_compiler::ExecutionContext::new(&program);
+        let (mut ee, mut initial_frame) = lambda_compiler::ExecutionContext::new(&program);
 
         let start = std::time::Instant::now();
-        (program.main.body)(&mut ee);
+        (program.main.body)(&mut ee, &mut initial_frame);
         let end = std::time::Instant::now();
         println!("Run Time: {:?}", end - start);
     }

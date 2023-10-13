@@ -16,6 +16,7 @@ lalrpop-util = { version = "0.20.0", default-features = false, features = [
   "unicode",
 ] }
 smallvec = "1.11.1"
+dyn-stack="0.9.1"
 
 
 # Cli library dependencies

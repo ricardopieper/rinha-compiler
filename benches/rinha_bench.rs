@@ -1,7 +1,10 @@
+use std::mem::MaybeUninit;
+
 use criterion::{BenchmarkId, Criterion};
+use dyn_stack::{StackReq, DynStack};
 use lambda_rinha::{
     hir::ast_to_hir,
-    lambda_compiler::{CompilationResult, ExecutionContext, LambdaCompiler},
+    lambda_compiler::{CompilationResult, ExecutionContext, LambdaCompiler, Value},
     parser,
 };
 
@@ -60,10 +63,16 @@ pub fn criterion_benchmark(c: &mut Criterion) {
         &PERF_PROGRAM,
         |b, &program| {
             let compiled = compile(&program);
+            /*
+            let mut buf = [MaybeUninit::uninit();
+            StackReq::new::<Value>(2000000)
+                .unaligned_bytes_required()];
 
-            b.iter(|| {
-                let mut ec = ExecutionContext::new(&compiled);
-                (compiled.main.body)(&mut ec);
+            let mut stack = DynStack::new(&mut buf);*/
+
+            b.iter(move || {
+                let (mut ec, mut frame) = ExecutionContext::new(&compiled);
+                (compiled.main.body)(&mut ec, &mut frame);
             });
         },
     );
@@ -72,10 +81,9 @@ pub fn criterion_benchmark(c: &mut Criterion) {
         &FIB_30,
         |b, &program| {
             let compiled = compile(program);
-
             b.iter(|| {
-                let mut ec = ExecutionContext::new(&compiled);
-                (compiled.main.body)(&mut ec);
+              let (mut ec, mut frame) = ExecutionContext::new(&compiled);
+                (compiled.main.body)(&mut ec, &mut frame);
             });
         },
     );
@@ -90,6 +98,8 @@ fn main() {
         .as_secs()
         .to_string();
     //let mut c = c.save_baseline(str_unix_time);
+
+
 
     criterion_benchmark(&mut c);
 }

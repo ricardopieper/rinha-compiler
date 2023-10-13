@@ -1,8 +1,8 @@
 let aaa = 987;
 
-let f = fn() => {
-    aaa
+let f = fn(i) => {
+    aaa + i
 };
 
-let i = f();
+let i = f(3);
 print("value of i: "+ i)
