@@ -19,7 +19,11 @@
                     "kind": "bin"
                 }
             },
+<<<<<<< HEAD
             "args": ["--mode=rinha", "test.rinha.json"],
+=======
+            "args": ["--mode=interpreter", "./files/fib.rinha"],
+>>>>>>> actual-stack
             "cwd": "${workspaceFolder}"
         },
         {

@@ -138,4 +138,122 @@ let _ = assert_eq(true || false, true);
 let _ = assert_eq(false || false, false);
 let _ = assert_eq(false || true, true);
 
+
+let _ = print("Testing function that takes no params");
+let f = fn() => {
+    98090
+};
+
+let _ = assert_eq(f(), 98090);
+
+let _ = print("Testing function that takes one param");
+
+let f = fn(x) => {
+    x
+};
+
+let _ = assert_eq(f(1), 1);
+
+let _ = print("Testing function that takes two params");
+
+let f = fn(x, y) => {
+    x + y
+};
+
+let _ = assert_eq(f(44, 55), 99);
+
+let _ = print("Testing function that returns a closure value");
+
+let aaa = 987;
+
+let f = fn() => {
+    aaa
+};
+
+let _ = assert_eq(f(), 987);
+
+let _ = print("Testing function that returns a closure value and takes a param");
+
+let aaa = 987;
+
+let f = fn(x) => {
+    aaa + x
+};
+
+let _ = assert_eq(f(3), 990);
+
+let _ = print("Testing nested closure behavior");
+
+let empty_env = fn(v) => {
+    ("ValErr", "undefined variable " + v)
+};
+
+let bind = fn(var, val, env) => {
+    fn(v) => {
+        if (var == v) {
+            val
+        } else {
+            env(v)
+        }
+    }
+};
+
+let env = bind("z", 67, empty_env);
+let env = bind("x", 32, env);
+let env = bind("l", 18, env);
+let env = bind("y", 12, env);
+
+let v = env("x");
+let _ = assert_eq(v, 32);
+
+let _ = print("Testing return function closure");
+
+let ret_func = fn() => {
+    let x = 6754;
+    fn() => {
+        x
+    }
+};
+
+let _ = assert_eq(ret_func()(), 6754);
+
+let _ = print("Testing looping behavior [with TCO]");
+let loop = fn (i, s) => {
+   if (i == 0) {
+     s
+   } else {
+      loop(i-1, s+1)
+   }
+};
+
+let loop_result = loop(321, 0);
+
+let _ = assert_eq(loop_result, 321);
+
+let _ = print("Testing fib(15)");
+
+let fib = fn (n) => {
+  if (n < 2) {
+    n
+  } else {
+    fib(n - 1) + fib(n - 2)
+  }
+};
+
+let _ = assert_eq(fib(15), 610);
+
+let _ = print("Testing closure behavior on recursive call");
+
+let y = 100;
+let x = fn(j) => { 
+    if (j == 0) {
+        1
+    } else { 
+        x(j-1) * y 
+    } 
+};
+
+let _ = assert_eq(x(3), 1000000);
+
+
 0

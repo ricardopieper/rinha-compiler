@@ -1,0 +1,8 @@
+let aaa = 987;
+
+let f = fn(i) => {
+    aaa + i
+};
+
+let i = f(3);
+print("value of i: "+ i)
