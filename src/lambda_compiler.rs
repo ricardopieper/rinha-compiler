@@ -225,7 +225,6 @@ impl FunctionData {
                     for l in leaked_lambdas {
                         vec.push(ec.run_lambda_trampoline(l));
                     }
-
                     vec
                 });
 
@@ -322,23 +321,32 @@ impl<'a> ExecutionContext<'a> {
         self.enable_memoization = false;
     }
 
+    #[inline(always)]
     pub fn frame_mut(&mut self) -> &mut StackFrame {
         self.call_stack.last_mut().unwrap()
     }
+
+    #[inline(always)]
     pub fn frame(&self) -> &StackFrame {
         self.call_stack.last().unwrap()
     }
+
+    #[inline(always)]
     pub fn pop_frame(&mut self) -> StackFrame {
         self.call_stack.pop().unwrap()
     }
+
+    #[inline(always)]
     pub fn push_frame(&mut self, frame: StackFrame) {
         self.call_stack.push(frame);
     }
 
+    #[inline(always)]
     fn eval_closure_no_env(&mut self, callable_index: usize) -> ClosurePointer {
         ClosurePointer(callable_index as u32)
     }
 
+    #[inline(always)]
     fn eval_closure_with_env(&mut self, callable_index: usize) -> ClosurePointer {
         let function = self.functions.get(callable_index).unwrap();
 
@@ -359,6 +367,7 @@ impl<'a> ExecutionContext<'a> {
         }
     }
 
+    #[inline(always)]
     fn eval_closure_with_env_trapolined(&mut self, callable_index: usize) -> ClosurePointer {
         let function = self.functions.get(callable_index).unwrap();
 
@@ -379,16 +388,19 @@ impl<'a> ExecutionContext<'a> {
         }
     }
 
+    #[inline(always)]
     fn eval_int(&self, value: i32) -> Value {
         Value::Int(value)
     }
 
+    #[inline(always)]
     fn eval_let(&mut self, evaluate_value: &LambdaFunction, stack_pos: StackPosition) -> Value {
         let bound_value = self.run_lambda_trampoline(evaluate_value);
         self.frame_mut().stack_data[stack_pos] = bound_value;
         Value::None
     }
 
+    #[inline(always)]
     fn eval_if(
         &mut self,
         evaluate_condition: &LambdaFunction,
@@ -405,6 +417,7 @@ impl<'a> ExecutionContext<'a> {
         }
     }
 
+    #[inline(always)]
     fn binop_add(&mut self, evaluate_lhs: &LambdaFunction, evaluate_rhs: &LambdaFunction) -> Value {
         let lhs = self.run_lambda_trampoline(evaluate_lhs);
         let rhs = self.run_lambda_trampoline(evaluate_rhs);
@@ -424,11 +437,12 @@ impl<'a> ExecutionContext<'a> {
         }
     }
 
+
+    #[inline(always)]
     fn fastcall(
         &mut self,
         callee_function: ClosurePointer,
-        arguments: &[LambdaFunction],
-        _called_name: &str,
+        arguments: &[LambdaFunction]
     ) -> Value {
         let ClosurePointer(p) = callee_function;
 
@@ -498,12 +512,14 @@ impl<'a> ExecutionContext<'a> {
         }
     }
 
+    #[inline(always)]
     fn eval_trampoline(&mut self, callable_index: usize, arguments: &[LambdaFunction]) -> Value {
         self.update_let_bindings_for_frame_reuse(arguments);
         let function = &self.functions[callable_index].body;
         function(self)
     }
 
+    #[inline(always)]
     fn update_let_bindings_for_frame_reuse(&mut self, arguments: &[LambdaFunction]) {
         for (i, arg) in arguments.iter().enumerate() {
             let trampolined = self.run_lambda_trampoline(arg);
@@ -511,6 +527,7 @@ impl<'a> ExecutionContext<'a> {
         }
     }
 
+    #[inline(always)]
     pub fn run_trampoline(&mut self, maybe_trampoline: Value) -> Value {
         let mut current @ Value::Trampoline(..) = maybe_trampoline else {
             return maybe_trampoline;
@@ -561,16 +578,19 @@ impl<'a> ExecutionContext<'a> {
         current
     }
 
+    #[inline(always)]
     pub fn run_lambda_trampoline(&mut self, lambda: &LambdaFunction) -> Value {
         let maybe_trampoline = lambda(self);
         self.run_trampoline(maybe_trampoline)
     }
 
+    #[inline(always)]
     fn pop_frame_and_bindings(&mut self) {
         let popped_frame = self.pop_frame();
         self.reusable_frames.push(popped_frame);
     }
 
+    #[inline(always)]
     fn make_new_frame(
         &mut self,
         callable_index: usize,
@@ -605,6 +625,8 @@ impl<'a> ExecutionContext<'a> {
         self.push_frame(new_frame);
     }
 
+
+    #[inline(always)]
     fn eval_tuple(
         &mut self,
         evaluate_first: &LambdaFunction,
@@ -707,6 +729,56 @@ impl LambdaCompiler {
         Symbol(index, s.to_string().leak())
     }
 
+    fn join_lambdas(&mut self, mut lambdas: Vec<LambdaFunction>) -> LambdaFunction {
+        
+        if lambdas.len() == 1 {
+            return lambdas.pop().unwrap()
+        }
+
+        let leaked: &'static [LambdaFunction] = lambdas.leak();
+        if leaked.len() == 2 {
+            let l0 = &leaked[0];
+            let l1 = &leaked[1];
+            return Box::new(move |ec| {
+                l0(ec);
+                l1(ec)
+            });
+        }
+
+        if leaked.len() == 3 {
+            let l0 = &leaked[0];
+            let l1 = &leaked[1];
+            let l2 = &leaked[2];
+            return Box::new(move |ec| {
+                l0(ec);
+                l1(ec);
+                l2(ec)
+            });
+        }
+
+        if leaked.len() == 4 {
+            let l0 = &leaked[0];
+            let l1 = &leaked[1];
+            let l2 = &leaked[2];
+            let l3 = &leaked[3];
+            return Box::new(move |ec| {
+                l0(ec);
+                l1(ec);
+                l2(ec);
+                l3(ec)
+            });
+        }
+
+        return Box::new(move |ec| {
+            let mut last = None;
+            for l in leaked {
+                last = Some(l(ec));
+            }
+            last.unwrap()
+        });
+    }
+
+
     fn compile_body(
         &mut self,
         body: &[Expr],
@@ -720,17 +792,10 @@ impl LambdaCompiler {
             current_fdata = fdata;
             lambdas.push(lambda);
         }
-        let leaked_lambdas: &'static [LambdaFunction] = lambdas.leak();
-        (
-            Box::new(move |ec: &mut ExecutionContext| {
-                let mut result = None;
-                for lambda in leaked_lambdas {
-                    result = Some(lambda(ec));
-                }
-                result.unwrap()
-            }),
-            current_fdata,
-        )
+
+        let joined = self.join_lambdas(lambdas);
+
+        return (joined, current_fdata);       
     }
 
     fn compile_internal(
@@ -836,7 +901,7 @@ impl LambdaCompiler {
 
                         return (
                             Box::new(move |ec| {
-                                ec.fastcall(ec.frame().closure_ptr, args_leaked, called_name)
+                                ec.fastcall(ec.frame().closure_ptr, args_leaked)
                             }),
                             new_fdata,
                         );
@@ -1173,15 +1238,7 @@ impl LambdaCompiler {
             function_data = new_fdata;
             body_lambdas.push(lambda);
         }
-        let leaked_lambdas: &'static [LambdaFunction] = body_lambdas.leak();
-        let new_function: LambdaFunction = Box::new(move |ec: &mut ExecutionContext| {
-            let mut last = None;
-            for l in leaked_lambdas {
-                let result = &l;
-                last = Some(result(ec));
-            }
-            last.unwrap()
-        });
+        let new_function = self.join_lambdas(body_lambdas);
 
         let parameters = parameters.to_vec();
         let mut param_indices = vec![];
@@ -1437,15 +1494,11 @@ impl LambdaCompiler {
             lambdas.push(lambda);
         }
 
-        let lambdas_leaked: &'static [LambdaFunction] = lambdas.leak();
+        let function = self.join_lambdas(lambdas);
         //trampolinize the returned value
         let trampolinized: LambdaFunction = Box::new(move |ec: &mut ExecutionContext| {
-            let mut last = None;
-            for l in lambdas_leaked {
-                let result = l(ec);
-                last = Some(result);
-            }
-            ec.run_trampoline(last.unwrap())
+            let result = function(ec);
+            ec.run_trampoline(result)
         });
 
         let mut function_layout = BTreeMap::new();
