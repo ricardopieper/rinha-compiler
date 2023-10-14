@@ -1,10 +1,7 @@
-use std::mem::MaybeUninit;
-
 use criterion::{BenchmarkId, Criterion};
-use dyn_stack::{StackReq, DynStack};
 use lambda_rinha::{
     hir::ast_to_hir,
-    lambda_compiler::{CompilationResult, ExecutionContext, LambdaCompiler, Value},
+    lambda_compiler::{CompilationResult, ExecutionContext, LambdaCompiler},
     parser,
 };
 
@@ -36,16 +33,12 @@ let work = fn(x) => {
     f * s
   };
 
-  iter(0, 500, work_closure, 0)
+  iter(0, 200, work_closure, 0)
 };
 
-<<<<<<< HEAD
-iter(0, 500, work, 0)
-=======
 let iteration = iter(0, 100, work, 0);
 
 print(iteration)
->>>>>>> actual-stack
 ";
 
 const FIB_30: &str = "

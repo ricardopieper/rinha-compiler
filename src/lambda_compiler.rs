@@ -1,5 +1,3 @@
-use dyn_stack::DynStack;
-use smallvec::SmallVec;
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::ops::{Index, IndexMut};
 
@@ -9,7 +7,7 @@ use crate::hir::{Expr, FuncDecl};
 
 pub type LambdaFunction = Box<dyn Fn(&mut ExecutionContext, &mut CallFrame) -> Value>;
 
-pub type ClosureStorage = SmallVec<[Value; 4]>;
+pub type ClosureStorage = Vec<Value>;
 
 #[derive(Debug)]
 pub struct Stats {
@@ -111,9 +109,7 @@ impl IndexMut<StackPosition> for StackData {
 }
 
 pub struct CallFrame {
-    function: usize,
     pub closure_ptr: ClosurePointer,
-    pub tco_reuse_frame: bool,
     pub stack_data: StackData,
 }
 
@@ -311,9 +307,7 @@ impl<'a> ExecutionContext<'a> {
                 closures: empty_closures,
             },
             CallFrame {
-                function: usize::MAX,
                 closure_ptr: ClosurePointer(u32::MAX),
-                tco_reuse_frame: false,
                 stack_data: initial_stack,
             },
         )
@@ -549,7 +543,6 @@ impl<'a> ExecutionContext<'a> {
             let Closure { callable_index, .. } = self.closures[p as usize];
 
             frame.closure_ptr = ClosurePointer(p);
-            frame.tco_reuse_frame = true;
 
             //this needs to be the TCO obj itself
             // let callee = &self.functions[callable_index as usize];
@@ -606,10 +599,8 @@ impl<'a> ExecutionContext<'a> {
         };
 
         let mut new_frame = CallFrame {
-            function: callable_index,
             stack_data, // { backing_store: () },
-            closure_ptr: closure_pointer,
-            tco_reuse_frame: false,
+            closure_ptr: closure_pointer
         };
 
         for (i, arg) in arguments.iter().enumerate() {
@@ -827,7 +818,7 @@ impl LambdaCompiler {
                     fdata,
                 )
             }
-            Expr::Int { value } => (Box::new(move |ec, frame| ec.eval_int(value)), function_data),
+            Expr::Int { value } => (Box::new(move |ec, _| ec.eval_int(value)), function_data),
             Expr::Var { name, .. } => {
                 let varname: &'static str = name.leak();
                 let symbol = self.intern_var_name(varname);
@@ -885,7 +876,7 @@ impl LambdaCompiler {
             Expr::String { value } => {
                 //let leaked: &'static str = value.leak();
                 (
-                    Box::new(move |ec, frame| {
+                    Box::new(move |ec, _| {
                         let current = ec.string_values.len();
                         ec.string_values.push(value.clone());
                         Value::Str(StringPointer(current as u32))
@@ -1082,13 +1073,13 @@ impl LambdaCompiler {
                 panic!("Trampoline calls should be resolved at compile time on Expr::TrampolineCall compilation! This is a compiler bug");
             }
             VariableType::RecursiveFunction { .. } => {
-                Box::new(move |ec: &mut ExecutionContext, frame: &mut CallFrame| {
+                Box::new(move |_, frame: &mut CallFrame| {
                     let var = frame.closure_ptr;
                     Value::Closure(var)
                 })
             }
             VariableType::StackPosition(pos) => {
-                Box::new(move |ec: &mut ExecutionContext, frame: &mut CallFrame| {
+                Box::new(move |_, frame: &mut CallFrame| {
                     let var = &frame.stack_data;
                     var[pos]
                 })
@@ -1298,7 +1289,7 @@ impl LambdaCompiler {
                         Value::Closure(ec.eval_closure_with_env(new_callable_index, frame))
                     })
                 } else {
-                    Box::new(move |ec: &mut ExecutionContext, frame: &mut CallFrame| {
+                    Box::new(move |ec: &mut ExecutionContext, _| {
                         Value::Closure(ec.eval_closure_no_env(new_callable_index))
                     })
                 }
@@ -1309,7 +1300,7 @@ impl LambdaCompiler {
                     )
                 })
             } else {
-                Box::new(move |ec: &mut ExecutionContext, frame: &mut CallFrame| {
+                Box::new(move |ec: &mut ExecutionContext, _| {
                     Value::Trampoline(ec.eval_closure_no_env(new_callable_index))
                 })
             },

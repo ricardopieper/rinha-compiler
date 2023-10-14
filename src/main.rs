@@ -9,8 +9,6 @@ use crate::ast::File;
 use clap::Parser;
 use clap::ValueEnum;
 use lalrpop_util::lalrpop_mod;
-use lambda_compiler::CallFrame;
-use lambda_compiler::Value;
 use miette::IntoDiagnostic;
 use owo_colors::OwoColorize;
 use serde::Deserialize;
@@ -73,10 +71,6 @@ fn log(out: fern::FormatCallback, message: &std::fmt::Arguments, record: &log::R
 
     out.finish(format_args!("  {level:>7} {}", message))
 }
-
-use core::mem::MaybeUninit;
-use dyn_stack::{DynStack, StackReq};
-
 
 /// The main function of the program.
 fn program() -> miette::Result<()> {
