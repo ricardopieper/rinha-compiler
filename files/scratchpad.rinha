@@ -1,8 +1,8 @@
-let aaa = 987;
-
-let f = fn(i) => {
-    aaa + i
+let loop = fn (i, s) => {
+   if (i == 0) {
+     s
+   } else {
+      loop(i-1, s+1)
+   }
 };
-
-let i = f(3);
-print("value of i: "+ i)
+print(loop(10, 0))

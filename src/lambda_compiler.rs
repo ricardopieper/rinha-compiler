@@ -1,13 +1,15 @@
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::ops::{Index, IndexMut};
 
+use smallvec::SmallVec;
+
 use crate::ast::BinaryOp;
 
 use crate::hir::{Expr, FuncDecl};
 
 pub type LambdaFunction = Box<dyn Fn(&mut ExecutionContext, &mut CallFrame) -> Value>;
 
-pub type ClosureStorage = Vec<Value>;
+pub type ClosureStorage = SmallVec<[Value; 4]>;
 
 #[derive(Debug)]
 pub struct Stats {
@@ -20,52 +22,199 @@ pub struct Closure {
     pub callable_index: usize,
     pub closure_env_index: usize, //pub environment: BTreeMap<usize, Value>
 }
-#[derive(Clone, Copy, Debug, Eq, PartialEq, PartialOrd, Ord)]
-pub struct HeapPointer(u32);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, PartialOrd, Ord)]
-pub struct StringPointer(u32);
+#[repr(u8)]
+pub enum ValueType {
+    Integer = 0b0000,
+    Boolean = 0b0001,
+    String = 0b0010,
+    TuplePtr = 0b0011,
+    SmallTuple = 0b0100,
+    Closure = 0b0101,
+    Trampoline = 0b0110,
+}
+
+impl ValueType {
+    pub fn tag(self) -> u64 {
+        (self as u8 as u64) << 60
+    }
+
+    pub fn from_u8(value: u8) -> Self {
+        match value {
+            0b0000 => Self::Integer,
+            0b0001 => Self::Boolean,
+            0b0010 => Self::String,
+            0b0011 => Self::TuplePtr,
+            0b0100 => Self::SmallTuple,
+            0b0101 => Self::Closure,
+            0b0110 => Self::Trampoline,
+            _ => {
+                panic!("Invalid value type tag: {:b}", value)
+            }
+        }
+    }
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, PartialOrd, Ord)]
-pub struct ClosurePointer(u32);
+pub struct Value(u64);
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, PartialOrd, Ord)]
-pub struct TuplePointer(u32);
+impl Value {
+    pub fn get_tag(self) -> u8 {
+        ((self.0 & 0xf000000000000000u64) >> 60) as u8
+    }
 
-/// Enum for runtime values
-#[derive(Clone, Copy, Debug, Eq, PartialEq, PartialOrd, Ord)]
-pub enum Value {
-    Int(i32),
-    Bool(bool),
-    Str(StringPointer),
-    Tuple(TuplePointer),
-    SmallTuple(i16, i16),
-    Closure(ClosurePointer),
-    Trampoline(ClosurePointer),
-    None,
+    pub fn new_int(i: i32) -> Self {
+        let as_u32: u32 = unsafe { std::mem::transmute(i) };
+        Value(as_u32 as u64)
+    }
+
+    pub fn read_int(self) -> i32 {
+        let lower_half = self.0 as u32;
+        unsafe { std::mem::transmute(lower_half) }
+    }
+
+    pub fn new_bool(i: bool) -> Self {
+        let i: u64 = i.into();
+        Value(i | (ValueType::Boolean.tag()))
+    }
+
+    pub fn read_bool(self) -> bool {
+        self.0 & 1 > 0
+    }
+
+    pub fn fits_in_30_bits(i: i32) -> bool {
+        i <= 0x1fffffff && i >= -0x20000000
+    }
+
+    //Assumes fits_in_30_bits
+    pub fn new_small_tuple(lhs: i32, rhs: i32) -> Self {
+        fn pack_30_bits(i: i32) -> u32 {
+            let as_u32: u32 = unsafe { std::mem::transmute(i) };
+            as_u32 & 0x3fffffffu32
+        }
+
+        let packed_lhs = pack_30_bits(lhs) as u64;
+        let packed_rhs = pack_30_bits(rhs) as u64;
+
+        let tag = ValueType::SmallTuple.tag();
+
+        let result = (packed_lhs << 30) | packed_rhs as u64 | tag;
+
+        Self(result)
+    }
+
+    pub fn read_small_tuple(self) -> (i32, i32) {
+        pub fn unpack_30_bits(i: u32) -> i32 {
+            //this i number has no leftmost bit as 1, it's not a negative number here because it's a 30-bit negative number transmuted into u32
+            //therefore when I read this 0b00xxxxxx number, it's guaranteed to retain its sign
+            let shift_until_sign = (i as i32) << 2;
+
+            //shift_until_sign means the leftmost, 30th bit is placed in the leftmost position of the i32
+            //so the value is like 0b100010010....00, the 2 ending 0s were added by the shift
+
+            let sign_extension = shift_until_sign >> 2;
+            //now the 1 in the leftmost position gets copied 2 times, like 0b11100010010...
+            //which is exactly what we want. If it's a positive number, 0 will be copied... which also works
+            sign_extension
+        }
+
+        let lhs = ((self.0 & 0x0fffffffc0000000) >> 30) as u32;
+        let rhs = (self.0 & 0x000000003fffffff) as u32;
+
+        (unpack_30_bits(lhs), unpack_30_bits(rhs))
+    }
+
+    pub fn make_string_ptr(str: &'static String) -> Self {
+        let as_u64: u64 = unsafe { std::mem::transmute(str) };
+        Value(as_u64 | ValueType::String.tag())
+    }
+
+    //assumes checked tag is string, otherwise this will explode
+    //Maybe this should be unsafe
+    pub fn get_string(self) -> &'static String {
+        let cleared_tag = 0x00ffffffffffffff & self.0;
+        unsafe { std::mem::transmute(cleared_tag) }
+    }
+
+    pub fn make_tuple_ptr(str: &'static (Value, Value)) -> Self {
+        let as_u64: u64 = unsafe { std::mem::transmute(str) };
+        Value(as_u64 | ValueType::TuplePtr.tag())
+    }
+
+    pub fn get_tuple(self) -> &'static (Value, Value) {
+        let cleared_tag = 0x00ffffffffffffff & self.0;
+        unsafe { std::mem::transmute(cleared_tag) }
+    }
+    pub fn make_closure(
+        //why? because I need a ptr, not a wide 16byte ptr
+        cls: &'static Closure,
+    ) -> Self {
+        let as_u64: u64 = unsafe { std::mem::transmute(cls) };
+        Value(as_u64 | ValueType::Closure.tag())
+    }
+
+    pub fn make_trampoline(
+        //why? because I need a ptr, not a wide 16byte ptr
+        cls: &'static Closure,
+    ) -> Self {
+        let as_u64: u64 = unsafe { std::mem::transmute(cls) };
+        Value(as_u64 | ValueType::Trampoline.tag())
+    }
+
+    pub fn get_closure(self) -> &'static Closure {
+        let cleared_tag = 0x00ffffffffffffff & self.0;
+        unsafe { std::mem::transmute(cleared_tag) }
+    }
+    /*
+    pub fn make_closure(
+        //why? because I need a ptr, not a wide 16byte ptr
+        str: &'static &'static dyn Fn(&mut ExecutionContext, &mut CallFrame) -> Value,
+    ) -> Self {
+        let as_u64: u64 = unsafe { std::mem::transmute(str) };
+        Value(as_u64 | ValueType::Closure.tag())
+    }
+
+    pub fn get_closure(
+        self,
+    ) -> &'static &'static dyn Fn(&mut ExecutionContext, &mut CallFrame) -> Value {
+        let cleared_tag = 0x00ffffffffffffff & self.0;
+        unsafe { std::mem::transmute(cleared_tag) }
+    }
+     */
 }
 
 impl Value {
     fn to_string(self, ec: &ExecutionContext) -> String {
-        match self {
-            Value::Trampoline(_) => "trampoline".to_string(),
-            Value::Int(i) => i.to_string(),
-            Value::Str(StringPointer(s)) => ec.string_values[s as usize].to_string(),
-            Value::Tuple(TuplePointer(t)) => {
-                let (f, s) = &ec.tuples[t as usize];
-                let a = &ec.heap[f.0 as usize];
-                let b = &ec.heap[s.0 as usize];
-                format!("({}, {})", a.to_string(ec), b.to_string(ec))
+        let self_tag = self.get_tag();
+        let vtype = ValueType::from_u8(self_tag);
+        match vtype {
+            ValueType::Integer => {
+                let i = self.read_int();
+                i.to_string()
             }
-            Value::SmallTuple(a, b) => format!("({}, {})", a, b),
-            /*Value::BoolTuple(a, b) => format!("({}, {})", a.to_string(), b.to_string()),
-            Value::IntBoolTuple(a, b) => format!("({}, {})", a.to_string(), b.to_string()),
-            Value::BoolIntTuple(a, b) => format!("({}, {})", a.to_string(), b.to_string()),*/
-            Value::Closure(..) => "function".to_string(),
-            //Value::Error(e) => format!("error: {}", e),
-            // Value::Unit => "unit".to_string(),
-            Value::Bool(b) => b.to_string(),
-            Value::None => "None".to_string(),
+            ValueType::Boolean => {
+                let b = self.read_bool();
+                b.to_string()
+            }
+            ValueType::String => {
+                let s = self.get_string();
+                s.to_string()
+            }
+            ValueType::TuplePtr => {
+                let (lhs, rhs) = self.get_tuple();
+                let lhs_str = lhs.to_string(ec);
+                let rhs_str = rhs.to_string(ec);
+                format!("({}, {})", lhs_str, rhs_str)
+            }
+            ValueType::SmallTuple => {
+                let (lhs, rhs) = self.read_small_tuple();
+                let lhs_str = lhs.to_string();
+                let rhs_str = rhs.to_string();
+                format!("({}, {})", lhs_str, rhs_str)
+            }
+            ValueType::Closure => "<function>".to_string(),
+            ValueType::Trampoline => "<trampoline>".to_string(),
         }
     }
 }
@@ -83,6 +232,7 @@ impl StackData {
         //available of the vec.
 
         unsafe { self.backing_store.set_len(self.backing_store.capacity()) }
+        //self.backing_store.clear();
     }
 
     fn new(len: usize) -> StackData {
@@ -109,7 +259,7 @@ impl IndexMut<StackPosition> for StackData {
 }
 
 pub struct CallFrame {
-    pub closure_ptr: ClosurePointer,
+    pub closure_ptr: &'static Closure,
     pub stack_data: StackData,
 }
 
@@ -247,9 +397,6 @@ pub struct ExecutionContext<'a> {
     //most things are done in the "stack" for some definition of stack which is very loose here....
     //this heap is for things like dynamic tuples that could very well be infinite.
     //This makes the Value enum smaller than storing boxes directly
-    pub heap: Vec<Value>,
-    pub tuples: Vec<(HeapPointer, HeapPointer)>,
-    pub closures: Vec<Closure>,
 }
 
 pub struct CompilationResult {
@@ -276,18 +423,6 @@ enum TailRecursivity {
 //Using dynstack to store closure values, frame data, etc.
 impl<'a> ExecutionContext<'a> {
     pub fn new(program: &'a CompilationResult) -> (Self, CallFrame) {
-        //whenever we want an empty closure, we'll access by the function index into closures without allocating a new one
-        let empty_closures = {
-            let mut closures = vec![];
-            for (i, _) in program.functions.iter().enumerate() {
-                closures.push(Closure {
-                    callable_index: i,
-                    closure_env_index: usize::MAX,
-                })
-            }
-            closures
-        };
-
         //let let_bindings = program.strings.iter().map(|s| vec![] ).collect();
         let initial_stack = {
             let mut vec = StackData {
@@ -301,21 +436,32 @@ impl<'a> ExecutionContext<'a> {
                 reusable_frames: vec![],
                 functions: &program.functions,
                 closure_environments: vec![],
-                heap: vec![],
                 string_values: program.strings.clone(),
-                tuples: vec![],
-                closures: empty_closures,
             },
             CallFrame {
-                closure_ptr: ClosurePointer(u32::MAX),
+                closure_ptr: Box::leak(Box::new(Closure {
+                    callable_index: 0,
+                    closure_env_index: usize::MAX,
+                })),
                 stack_data: initial_stack,
             },
         )
     }
 
     #[inline(always)]
-    fn eval_closure_no_env(&mut self, callable_index: usize) -> ClosurePointer {
-        ClosurePointer(callable_index as u32)
+    fn eval_closure_no_env(&mut self, callable_index: usize) -> &'static Closure {
+        let cls = Closure {
+            callable_index,
+            closure_env_index: usize::MAX,
+        };
+        //@TODO always the same closure to stop allocating
+        self.leak(cls)
+    }
+
+    fn leak<T: 'static>(&self, data: T) -> &'static T {
+        let boxed = Box::new(data);
+        let leaked: &'static T = Box::leak(boxed);
+        leaked
     }
 
     #[inline(always)]
@@ -323,54 +469,26 @@ impl<'a> ExecutionContext<'a> {
         &mut self,
         callable_index: usize,
         frame: &mut CallFrame,
-    ) -> ClosurePointer {
+    ) -> &'static Closure {
         let function = self.functions.get(callable_index).unwrap();
 
-        if let Some(builder) = &function.closure_builder {
+        let closure = if let Some(builder) = &function.closure_builder {
             let current_id = self.closure_environments.len();
             let vec = builder(self, frame);
             self.closure_environments.push(vec);
 
-            let closure = Closure {
+            Closure {
                 callable_index,
                 closure_env_index: current_id,
-            };
-            let closure_p = self.closures.len();
-            self.closures.push(closure);
-            ClosurePointer(closure_p as u32)
+            }
         } else {
-            ClosurePointer(callable_index as u32)
-        }
-    }
-
-    #[inline(always)]
-    fn eval_closure_with_env_trapolined(
-        &mut self,
-        callable_index: usize,
-        frame: &mut CallFrame,
-    ) -> ClosurePointer {
-        let function = self.functions.get(callable_index).unwrap();
-
-        if let Some(builder) = &function.closure_builder {
-            let current_id = self.closure_environments.len();
-            let vec = builder(self, frame);
-            self.closure_environments.push(vec);
-
-            let closure = Closure {
+            Closure {
                 callable_index,
-                closure_env_index: current_id,
-            };
-            let closure_p = self.closures.len();
-            self.closures.push(closure);
-            ClosurePointer(closure_p as u32)
-        } else {
-            ClosurePointer(callable_index as u32)
-        }
-    }
+                closure_env_index: usize::MAX,
+            }
+        };
 
-    #[inline(always)]
-    fn eval_int(&self, value: i32) -> Value {
-        Value::Int(value)
+        self.leak(closure)
     }
 
     #[inline(always)]
@@ -382,7 +500,7 @@ impl<'a> ExecutionContext<'a> {
     ) -> Value {
         let bound_value = self.run_lambda_trampoline(evaluate_value, frame);
         frame.stack_data[stack_pos] = bound_value;
-        Value::None
+        Value(0) //we can return whatever here
     }
 
     #[inline(always)]
@@ -394,12 +512,14 @@ impl<'a> ExecutionContext<'a> {
         frame: &mut CallFrame,
     ) -> Value {
         let condition_result = self.run_lambda_trampoline(evaluate_condition, frame);
-        match condition_result {
-            Value::Bool(true) => evaluate_then(self, frame),
-            Value::Bool(false) => evaluate_otherwise(self, frame),
-            _ => {
-                panic!("Type error: Cannot evaluate condition on this value: {condition_result:?}")
-            }
+        if !condition_result.get_tag() == ValueType::Boolean as u8 {
+            panic!("Type error: Cannot evaluate condition on this value: {condition_result:?}")
+        }
+        let b = condition_result.read_bool(); 
+        if b {
+            self.run_lambda_trampoline(evaluate_then, frame)
+        } else {
+            self.run_lambda_trampoline(evaluate_otherwise, frame)
         }
     }
 
@@ -412,16 +532,20 @@ impl<'a> ExecutionContext<'a> {
     ) -> Value {
         let lhs = self.run_lambda_trampoline(evaluate_lhs, frame);
         let rhs = self.run_lambda_trampoline(evaluate_rhs, frame);
-        match (&lhs, &rhs) {
-            (Value::Int(lhs), Value::Int(rhs)) => Value::Int(lhs + rhs),
-            (Value::Int(lhs), Value::Bool(rhs)) => Value::Int(lhs + *rhs as i32),
-            (lhs, rhs @ Value::Str(..)) | (lhs @ Value::Str(..), rhs) => {
-                let str = format!("{}{}", lhs.to_string(self), rhs.to_string(self));
-                let current = StringPointer(self.string_values.len() as u32);
-                self.string_values.push(str);
-                Value::Str(current)
+
+        let lhs_type = ValueType::from_u8(lhs.get_tag());
+        let rhs_type = ValueType::from_u8(rhs.get_tag());
+
+        match (&lhs_type, &rhs_type) {
+            (ValueType::Integer, ValueType::Integer) => Value::new_int(lhs.0 as i32 + rhs.0 as i32),
+            (_, ValueType::String) | (ValueType::String, _) => {
+                let str: &'static String = Box::leak(Box::new(format!(
+                    "{}{}",
+                    lhs.to_string(self),
+                    rhs.to_string(self)
+                )));
+                Value::make_string_ptr(str)
             }
-            (Value::Bool(lhs), Value::Int(rhs)) => Value::Int(*lhs as i32 + *rhs),
             _ => panic!(
                 "Type error: Cannot apply binary operator + on these values: {lhs:?} and {rhs:?}"
             ),
@@ -431,27 +555,28 @@ impl<'a> ExecutionContext<'a> {
     #[inline(always)]
     fn fastcall(
         &mut self,
-        callee_function: ClosurePointer,
+        callee_function: &'static Closure,
         arguments: &[LambdaFunction],
         frame: &mut CallFrame,
     ) -> Value {
-        let ClosurePointer(p) = callee_function;
+        let Closure { callable_index, .. } = callee_function;
 
-        let Closure { callable_index, .. } = self.closures[p as usize];
-        let mut new_frame =
-            self.make_new_frame(callable_index, ClosurePointer(p), arguments, frame);
+        let mut new_frame = self.make_new_frame(callee_function, arguments, frame);
 
-        let function = &self.functions[callable_index].body;
+        let function = &self.functions[*callable_index].body;
         let function_result = function(self, &mut new_frame);
+        let function_result_type = ValueType::from_u8(function_result.get_tag());
 
-        if let Value::Trampoline(ClosurePointer(p)) = &function_result {
+        if let ValueType::Trampoline = function_result_type {
             //if the trampoline returned is not for ourselves, then we evaluate it
-            let closure = &self.closures[*p as usize];
+            let cls = function_result.get_closure();
+
             let Closure {
                 callable_index: trampoline_callable_index,
                 ..
-            } = closure;
-            if *trampoline_callable_index != callable_index {
+            } = cls;
+
+            if trampoline_callable_index != callable_index {
                 //should this run in the current or new frame?
                 self.run_trampoline(function_result, &mut new_frame)
             } else {
@@ -471,32 +596,33 @@ impl<'a> ExecutionContext<'a> {
         frame: &mut CallFrame,
     ) -> Value {
         let callee_function = evaluate_callee(self, frame);
-
-        let Value::Closure(ClosurePointer(p)) = callee_function else {
+        if callee_function.get_tag() != ValueType::Closure as u8 {
             panic!("Call to non-function value {called_name}: {callee_function:?}")
-        };
-        let Closure { callable_index, .. } = self.closures[p as usize];
-        let callable = &self.functions[callable_index];
+        }
+
+        let cls = callee_function.get_closure();
+        let Closure { callable_index, .. } = cls;
+        let callable = &self.functions[*callable_index];
 
         if callable.parameters.len() != arguments.len() {
             panic!("Wrong number of arguments for function {called_name}")
         }
 
-        let mut new_frame =
-            self.make_new_frame(callable_index, ClosurePointer(p), arguments, frame);
+        let mut new_frame = self.make_new_frame(cls, arguments, frame);
 
-        let function = &self.functions[callable_index].body;
+        let function = &callable.body;
 
         let function_result = function(self, &mut new_frame);
+        let function_result_type = ValueType::from_u8(function_result.get_tag());
 
-        if let Value::Trampoline(ClosurePointer(p)) = &function_result {
+        if let ValueType::Trampoline = function_result_type {
             //if the trampoline returned is not for ourselves, then we evaluate it
-            let closure = &self.closures[*p as usize];
+            let closure = function_result.get_closure();
             let Closure {
                 callable_index: trampoline_callable_index,
                 ..
             } = closure;
-            if *trampoline_callable_index != callable_index {
+            if trampoline_callable_index != callable_index {
                 self.run_trampoline(function_result, &mut new_frame)
             } else {
                 function_result
@@ -535,37 +661,24 @@ impl<'a> ExecutionContext<'a> {
 
     #[inline(always)]
     pub fn run_trampoline(&mut self, maybe_trampoline: Value, frame: &mut CallFrame) -> Value {
-        let mut current @ Value::Trampoline(..) = maybe_trampoline else {
-            return maybe_trampoline;
-        };
+        {
+            let current_type = ValueType::from_u8(maybe_trampoline.get_tag());
 
-        while let Value::Trampoline(ClosurePointer(p)) = current {
-            let Closure { callable_index, .. } = self.closures[p as usize];
+            if current_type != ValueType::Trampoline {
+                return maybe_trampoline;
+            };
+        }
 
-            frame.closure_ptr = ClosurePointer(p);
+        let mut current = maybe_trampoline;
+        let mut current_type = ValueType::from_u8(current.get_tag());
 
-            //this needs to be the TCO obj itself
-            // let callee = &self.functions[callable_index as usize];
-            /*
-            In order for the trampoline mechanism to work, we must ensure we're not calling
-            the trampoline inside the execution of the trampolined function. This would be the same as
-            just calling the function as is. We must end this stack frame (this lambda function)
-            by returning the closure value.
-
-            The trampoline function belongs to a recursive function, therefore we can check if the trampoline returned
-            belongs to this executing function. Counter intuitively, if that's the case, we *skip* the execution and just return it,
-            so that the original caller of the recursive function (that is not itself) can perform the trampoline.
-            */
-
-            let function = &self.functions[callable_index].body;
-
-            //We don't need to setup a new stack frame because when we call this function,
-            //eval_call will run (because it's a *tail call optimization*), which will setup its own call stack.
-            //however, we count how many stacks we pushed and pop them all later
-
+        while current_type == ValueType::Trampoline {
+            let cls = current.get_closure();
+            let Closure { callable_index, .. } = cls;
+            frame.closure_ptr = cls;
+            let function = &self.functions[*callable_index].body;
             current = function(self, frame);
-
-            //self.pop_frame_and_bindings();
+            current_type = ValueType::from_u8(current.get_tag());
         }
 
         current
@@ -584,12 +697,12 @@ impl<'a> ExecutionContext<'a> {
     #[inline(always)]
     fn make_new_frame(
         &mut self,
-        callable_index: usize,
-        closure_pointer: ClosurePointer,
+        closure_ptr: &'static Closure,
         arguments: &[LambdaFunction],
         current_frame: &mut CallFrame,
     ) -> CallFrame {
-        let callable = &self.functions[callable_index];
+        let Closure { callable_index, .. } = closure_ptr;
+        let callable = &self.functions[*callable_index];
 
         let stack_data = if let Some(mut s) = self.reusable_frames.pop() {
             s.reset(callable.layout.len());
@@ -600,7 +713,7 @@ impl<'a> ExecutionContext<'a> {
 
         let mut new_frame = CallFrame {
             stack_data, // { backing_store: () },
-            closure_ptr: closure_pointer
+            closure_ptr,
         };
 
         for (i, arg) in arguments.iter().enumerate() {
@@ -620,44 +733,23 @@ impl<'a> ExecutionContext<'a> {
     ) -> Value {
         let f = self.run_lambda_trampoline(evaluate_first, frame);
         let s = self.run_lambda_trampoline(evaluate_second, frame);
-        match (f, s) {
-            (Value::Int(a), Value::Int(b)) => {
-                //transform into i16 if in range
-                if a < i16::MAX as i32
-                    && a > i16::MIN as i32
-                    && b < i16::MAX as i32
-                    && b > i16::MIN as i32
-                {
-                    Value::SmallTuple(a as i16, b as i16)
-                } else {
-                    let heap_a = self.heap.len();
-                    self.heap.push(Value::Int(a));
-                    let heap_b = self.heap.len();
-                    self.heap.push(Value::Int(b));
+        let f_ty = ValueType::from_u8(f.get_tag());
+        let s_ty = ValueType::from_u8(s.get_tag());
 
-                    let tuple_p = self.tuples.len();
-                    self.tuples
-                        .push((HeapPointer(heap_a as u32), HeapPointer(heap_b as u32)));
+        match (f_ty, s_ty) {
+            (ValueType::Integer, ValueType::Integer) => {
+                let f_int = f.read_int();
+                let s_int = s.read_int();
 
-                    Value::Tuple(TuplePointer(tuple_p as u32))
+                if Value::fits_in_30_bits(f_int) && Value::fits_in_30_bits(s_int) {
+                    return Value::new_small_tuple(f_int, s_int);
                 }
-            } /*
-            (Value::Bool(a), Value::Bool(b)) => Value::BoolTuple(a, b),
-            (Value::Int(a), Value::Bool(b)) => Value::IntBoolTuple(a, b),
-            (Value::Bool(a), Value::Int(b)) => Value::BoolIntTuple(a, b),*/
-            (a, b) => {
-                let heap_a = self.heap.len();
-                self.heap.push(a);
-                let heap_b = self.heap.len();
-                self.heap.push(b);
-
-                let tuple_p = self.tuples.len();
-                self.tuples
-                    .push((HeapPointer(heap_a as u32), HeapPointer(heap_b as u32)));
-
-                Value::Tuple(TuplePointer(tuple_p as u32))
             }
-        }
+            _ => {}
+        };
+
+        let leaked: &'static _ = Box::leak(Box::new((f, s)));
+        Value::make_tuple_ptr(leaked)
     }
 }
 
@@ -818,7 +910,7 @@ impl LambdaCompiler {
                     fdata,
                 )
             }
-            Expr::Int { value } => (Box::new(move |ec, _| ec.eval_int(value)), function_data),
+            Expr::Int { value } => (Box::new(move |_, _| Value::new_int(value)), function_data),
             Expr::Var { name, .. } => {
                 let varname: &'static str = name.leak();
                 let symbol = self.intern_var_name(varname);
@@ -874,15 +966,10 @@ impl LambdaCompiler {
             // Expr::Error(e) => panic!("{}: {}", e.message, e.full_text),
             Expr::BinOp { op, left, right } => self.compile_binexp(left, right, op, function_data),
             Expr::String { value } => {
-                //let leaked: &'static str = value.leak();
-                (
-                    Box::new(move |ec, _| {
-                        let current = ec.string_values.len();
-                        ec.string_values.push(value.clone());
-                        Value::Str(StringPointer(current as u32))
-                    }),
-                    function_data,
-                )
+                let throw_at_heap = Box::new(value);
+                let leaked: &'static String = Box::leak(throw_at_heap);
+                let val = Value::make_string_ptr(leaked);
+                (Box::new(move |_, _| val), function_data)
             }
             Expr::FuncCall { func, args } => {
                 if let Expr::Var { name } = *func.clone() {
@@ -981,45 +1068,21 @@ impl LambdaCompiler {
             }
             //only works on tuples
             Expr::First { value, .. } => {
-                let (evaluate_value, first_fdata) =
-                    self.compile_internal(*value, function_data, current_let);
-                (
-                    Box::new(move |ec: &mut ExecutionContext, frame: &mut CallFrame| {
-                        let value = ec.run_lambda_trampoline(&evaluate_value, frame);
-                        match value {
-                            Value::Tuple(ptr) => {
-                                let (a, _) = &ec.tuples[ptr.0 as usize];
-                                ec.heap[a.0 as usize]
-                            }
-                            Value::SmallTuple(a, _) => Value::Int(a as i32),
-                            /*Value::IntTuple(a, _) => Value::Int(a),
-                            Value::BoolTuple(a, _) => Value::Bool(a),
-                            Value::BoolIntTuple(a, _) => Value::Bool(a),
-                            Value::IntBoolTuple(a, _) => Value::Int(a),*/
-                            _ => {
-                                panic!("Type error: Cannot evaluate first on this value: {value:?}")
-                            }
-                        }
-                    }),
-                    first_fdata,
-                )
-            }
-            Expr::Second { value, .. } => {
                 let (evaluate_value, second_fdata) =
                     self.compile_internal(*value, function_data, current_let);
                 (
                     Box::new(move |ec: &mut ExecutionContext, frame: &mut CallFrame| {
                         let value = ec.run_lambda_trampoline(&evaluate_value, frame);
-                        match value {
-                            Value::Tuple(ptr) => {
-                                let (_, b) = &ec.tuples[ptr.0 as usize];
-                                ec.heap[b.0 as usize]
+                        let value_type = ValueType::from_u8(value.get_tag());
+                        match value_type {
+                            ValueType::TuplePtr => {
+                                let (a, _) = value.get_tuple();
+                                *a
                             }
-                            Value::SmallTuple(_, a) => Value::Int(a as i32),
-                            /*Value::IntTuple(_, a) => Value::Int(a),
-                            Value::BoolTuple(_, a) => Value::Bool(a),
-                            Value::BoolIntTuple(_, a) => Value::Int(a),
-                            Value::IntBoolTuple(_, a) => Value::Bool(a),*/
+                            ValueType::SmallTuple => {
+                                let (a, _) = value.read_small_tuple();
+                                Value::new_int(a)
+                            }
                             _ => panic!(
                                 "Type error: Cannot evaluate second on this value: {}",
                                 value.to_string(ec)
@@ -1029,7 +1092,34 @@ impl LambdaCompiler {
                     second_fdata,
                 )
             }
-            Expr::Bool { value, .. } => (Box::new(move |_, _| Value::Bool(value)), function_data),
+            Expr::Second { value, .. } => {
+                let (evaluate_value, second_fdata) =
+                    self.compile_internal(*value, function_data, current_let);
+                (
+                    Box::new(move |ec: &mut ExecutionContext, frame: &mut CallFrame| {
+                        let value = ec.run_lambda_trampoline(&evaluate_value, frame);
+                        let value_type = ValueType::from_u8(value.get_tag());
+                        match value_type {
+                            ValueType::TuplePtr => {
+                                let (_, b) = value.get_tuple();
+                                *b
+                            }
+                            ValueType::SmallTuple => {
+                                let (_, b) = value.read_small_tuple();
+                                Value::new_int(b)
+                            }
+                            _ => panic!(
+                                "Type error: Cannot evaluate second on this value: {}",
+                                value.to_string(ec)
+                            ),
+                        }
+                    }),
+                    second_fdata,
+                )
+            }
+            Expr::Bool { value, .. } => {
+                (Box::new(move |_, _| Value::new_bool(value)), function_data)
+            }
             Expr::Tuple { first, second, .. } => {
                 let (evaluate_first, first_fdata) =
                     self.compile_internal(*first, function_data, None);
@@ -1072,18 +1162,14 @@ impl LambdaCompiler {
             VariableType::Trampoline { .. } => {
                 panic!("Trampoline calls should be resolved at compile time on Expr::TrampolineCall compilation! This is a compiler bug");
             }
-            VariableType::RecursiveFunction { .. } => {
-                Box::new(move |_, frame: &mut CallFrame| {
-                    let var = frame.closure_ptr;
-                    Value::Closure(var)
-                })
-            }
-            VariableType::StackPosition(pos) => {
-                Box::new(move |_, frame: &mut CallFrame| {
-                    let var = &frame.stack_data;
-                    var[pos]
-                })
-            }
+            VariableType::RecursiveFunction { .. } => Box::new(move |_, frame: &mut CallFrame| {
+                let var = frame.closure_ptr;
+                Value::make_closure(var)
+            }),
+            VariableType::StackPosition(pos) => Box::new(move |_, frame: &mut CallFrame| {
+                let var = &frame.stack_data;
+                var[pos]
+            }),
             VariableType::Closure => {
                 //need to find the index of this name in the closure
                 let mut found = function_data.closure.iter().position(|var| var == &symbol);
@@ -1096,11 +1182,11 @@ impl LambdaCompiler {
                     let closure_env = frame.closure_ptr;
                     let Closure {
                         closure_env_index, ..
-                    } = ec.closures[closure_env.0 as usize];
+                    } = closure_env;
                     // Can we do this in-frame? No because we can call a function that deep into its stack frame returns a closure all the way to us, at that stage
                     // we have no context where the values might have come from, they might be stack data already popped, so it will construct a closure instance and we get it here
 
-                    let env = &ec.closure_environments[closure_env_index];
+                    let env = &ec.closure_environments[*closure_env_index];
                     env[closure_var_idx]
                 })
             }
@@ -1286,22 +1372,20 @@ impl LambdaCompiler {
             if trampoline_of.is_none() {
                 if !callable.closure_vars.is_empty() {
                     Box::new(move |ec: &mut ExecutionContext, frame: &mut CallFrame| {
-                        Value::Closure(ec.eval_closure_with_env(new_callable_index, frame))
+                        Value::make_closure(ec.eval_closure_with_env(new_callable_index, frame))
                     })
                 } else {
                     Box::new(move |ec: &mut ExecutionContext, _| {
-                        Value::Closure(ec.eval_closure_no_env(new_callable_index))
+                        Value::make_closure(ec.eval_closure_no_env(new_callable_index))
                     })
                 }
             } else if !callable.closure_vars.is_empty() {
                 Box::new(move |ec: &mut ExecutionContext, frame: &mut CallFrame| {
-                    Value::Trampoline(
-                        ec.eval_closure_with_env_trapolined(new_callable_index, frame),
-                    )
+                    Value::make_trampoline(ec.eval_closure_with_env(new_callable_index, frame))
                 })
             } else {
                 Box::new(move |ec: &mut ExecutionContext, _| {
-                    Value::Trampoline(ec.eval_closure_no_env(new_callable_index))
+                    Value::make_trampoline(ec.eval_closure_no_env(new_callable_index))
                 })
             },
             function_data,
@@ -1544,201 +1628,161 @@ impl LambdaCompiler {
 
     fn compile_binexp_opt(
         &mut self,
-        lhs: Box<Expr>,
-        rhs: Box<Expr>,
+        lhs: Expr,
+        rhs: Expr,
         op: BinaryOp,
         function_data: FunctionData,
     ) -> Option<(LambdaFunction, FunctionData)> {
-        macro_rules! comparison_op {
-            ($lhs:expr, $rhs:expr, $ec:expr, $op:tt) => {
-                match ($lhs, $rhs) {
-                    (Value::Int(lhs), Value::Int(rhs)) => {
-                        Value::Bool(lhs $op rhs)
-                    },
-                    (Value::Str(StringPointer(lhs)), Value::Str(StringPointer(rhs))) => {
-                        let lhs = &$ec.string_values[lhs as usize];
-                        let rhs = &$ec.string_values[rhs as usize];
-                        Value::Bool(lhs $op rhs)
-                    }
-                    (Value::Bool(lhs), Value::Bool(rhs)) => {
-                        Value::Bool(lhs $op rhs)
-                    }
-                    _ => panic!(
-                        "Type error: Cannot apply binary operator {op} on these values: {lhs:?} and {rhs:?}",
-                        op = stringify!($op)
-                    ),
-                }
-            }
-        }
-
-        macro_rules! binary_and_or {
-            ($lhs:expr, $rhs:expr, $ec:expr, $op:tt) => {
-                match ($lhs, $rhs) {
-                    (Value::Bool(lhs), Value::Bool(rhs)) => {
-                        Value::Bool(lhs $op rhs)
-                    },
-                    _ => panic!(
-                        "Type error: Cannot apply binary operator {op} on these values: {lhs:?} and {rhs:?}",
-                        op = stringify!($op)
-                    ),
-                }
-            };
-        }
-
-        macro_rules! int_arith_op {
-            ($lhs:expr, $rhs:expr, $ec:expr, $op:tt) => {
-                match ($lhs, $rhs) {
-                    (Value::Int(lhs), Value::Int(rhs)) => {
-                        Value::Int(lhs $op rhs)
-                    }
-                    _ => panic!(
-                        "Type error: Cannot apply binary operator {op} on these values: {lhs:?} and {rhs:?}",
-                        op = stringify!($op)
-                    ),
-                }
-            }
-        }
-
-        macro_rules! binop_add {
-            ($lhs:expr, $rhs:expr, $ec:expr, $op:tt) => {
-                match ($lhs, $rhs) {
-                    (Value::Int(lhs), Value::Int(rhs)) => {
-                        Value::Int(lhs + rhs)
-                    }
-                    (lhs, rhs @ Value::Str(..)) | (lhs @ Value::Str(..), rhs) => {
-                        let str = format!("{}{}", lhs.to_string($ec), rhs.to_string($ec));
-                        let current = StringPointer($ec.string_values.len() as u32);
-                        $ec.string_values.push(str);
-                        Value::Str(current)
-                    }
-                    _ => panic!(
-                        "Type error: Cannot apply binary operator + on these values: {lhs:?} and {rhs:?}"
-                    ),
-                }
-            };
-        }
-
-        macro_rules! dispatch_bin_op {
-            ($mode:ident, $op:tt) => {
-                match $op {
-                    BinaryOp::Add => $mode!(+, binop_add),
-                    BinaryOp::Sub => $mode!(-, int_arith_op),
-                    BinaryOp::Mul => $mode!(*, int_arith_op),
-                    BinaryOp::Div => $mode!(/, int_arith_op),
-                    BinaryOp::Rem => $mode!(%, int_arith_op),
-                    BinaryOp::Eq => $mode!(==, comparison_op),
-                    BinaryOp::Neq => $mode!(!=, comparison_op),
-                    BinaryOp::Lt => $mode!(<, comparison_op),
-                    BinaryOp::Gt => $mode!(>, comparison_op),
-                    BinaryOp::Lte => $mode!(<=, comparison_op),
-                    BinaryOp::Gte => $mode!(>=, comparison_op),
-                    BinaryOp::And => $mode!(&&, binary_and_or),
-                    BinaryOp::Or => $mode!(||, binary_and_or),
-                }
-            };
-        }
-
-        let e = (&*lhs, &*rhs);
+        let e = (lhs, rhs);
         let result: (LambdaFunction, FunctionData) = match e {
             //LHS is anything, RHS is int
-            (lhs, Expr::Int { value }) => {
+            (lhs, Expr::Int { value: int_value }) => {
                 let (index_lhs, lhs_fdata) =
                     self.compile_internal(lhs.clone(), function_data, None);
-                let int_value = Value::Int(*value);
 
-                macro_rules! variable_int_binop {
-                    ($op:tt, $operation_name:ident) => {
+                macro_rules! rhs_const_arith {
+                    ($op:tt) => {
                         (
                             Box::new(move |ec: &mut ExecutionContext, frame: &mut CallFrame| {
                                 let lhs = ec.run_lambda_trampoline(&index_lhs, frame);
-                                $operation_name!(lhs, int_value, ec, $op)
+                                let lhs_type = ValueType::from_u8(lhs.get_tag());
+
+                                match lhs_type {
+                                    ValueType::Integer => Value::new_int(lhs.read_int() $op int_value),
+                                    _ => panic!("Type error: Cannot evaluate {} on this value: {}", stringify!($op), lhs.to_string(ec)),
+                                }
                             }),
                             lhs_fdata,
                         )
                     };
                 }
-                dispatch_bin_op!(variable_int_binop, op)
-            }
-            //LHS could be anything, RHS is bool
-            (lhs, Expr::Bool { value }) => {
-                let (index_lhs, lhs_fdata) =
-                    self.compile_internal(lhs.clone(), function_data, None);
-                let bool_value = Value::Bool(*value);
 
-                macro_rules! variable_int_binop {
-                    ($op:tt, $operation_name:ident) => {
+                macro_rules! rhs_const_compare_int {
+                    ($op:tt) => {
                         (
                             Box::new(move |ec: &mut ExecutionContext, frame: &mut CallFrame| {
                                 let lhs = ec.run_lambda_trampoline(&index_lhs, frame);
-                                $operation_name!(lhs, bool_value, ec, $op)
+                                let lhs_type = ValueType::from_u8(lhs.get_tag());
+
+                                match lhs_type {
+                                    ValueType::Integer => Value::new_bool(lhs.read_int() $op int_value),
+                                    _ => panic!("Type error: Cannot evaluate {} on this value: {}", stringify!($op), lhs.to_string(ec)),
+                                }
                             }),
                             lhs_fdata,
                         )
                     };
                 }
-                dispatch_bin_op!(variable_int_binop, op)
+
+                match op {
+                    BinaryOp::Add => (
+                        Box::new(move |ec: &mut ExecutionContext, frame: &mut CallFrame| {
+                            let lhs = ec.run_lambda_trampoline(&index_lhs, frame);
+                            let lhs_type = ValueType::from_u8(lhs.get_tag());
+
+                            match lhs_type {
+                                ValueType::Integer => Value::new_int(lhs.read_int() + int_value),
+                                ValueType::String => {
+                                    let mut s = lhs.get_string().to_string();
+                                    s.push_str(&int_value.to_string());
+                                    Value::make_string_ptr(ec.leak(s))
+                                }
+                                _ => panic!(
+                                    "Type error: Cannot evaluate + on this value: {}",
+                                    lhs.to_string(ec)
+                                ),
+                            }
+                        }),
+                        lhs_fdata,
+                    ),
+                    BinaryOp::Sub => rhs_const_arith!(-),
+                    BinaryOp::Mul => rhs_const_arith!(*),
+                    BinaryOp::Div => rhs_const_arith!(/),
+                    BinaryOp::Rem => rhs_const_arith!(%),
+                    BinaryOp::Eq => rhs_const_compare_int!(==),
+                    BinaryOp::Neq => rhs_const_compare_int!(!=),
+                    BinaryOp::Lt => rhs_const_compare_int!(<),
+                    BinaryOp::Gt => rhs_const_compare_int!(>),
+                    BinaryOp::Lte => rhs_const_compare_int!(<=),
+                    BinaryOp::Gte => rhs_const_compare_int!(>=),
+                    BinaryOp::And => panic!("&& cannot be applied to int"),
+                    BinaryOp::Or => panic!("|| cannot be applied to int"),
+                }
             }
-            //LHS is int, RHS could be anything
-            (Expr::Int { value }, rhs) => {
+            (Expr::Int { value: int_value }, rhs) => {
                 let (index_rhs, rhs_fdata) =
                     self.compile_internal(rhs.clone(), function_data, None);
-                let int_value = Value::Int(*value);
 
-                macro_rules! variable_int_binop {
-                    ($op:tt, $operation_name:ident) => {
+                macro_rules! lhs_const_arith {
+                    ($op:tt) => {
                         (
                             Box::new(move |ec: &mut ExecutionContext, frame: &mut CallFrame| {
                                 let rhs = ec.run_lambda_trampoline(&index_rhs, frame);
-                                $operation_name!(int_value, rhs, ec, $op)
+                                let rhs_type = ValueType::from_u8(rhs.get_tag());
+
+                                match rhs_type {
+                                    ValueType::Integer => Value::new_int(int_value $op rhs.read_int()),
+                                    _ => panic!("Type error: Cannot evaluate {} on this value: {}", stringify!($op), rhs.to_string(ec)),
+                                }
                             }),
                             rhs_fdata,
                         )
                     };
                 }
-                dispatch_bin_op!(variable_int_binop, op)
-            }
-            //LHS is bool, RHS could be anything
-            (Expr::Bool { value }, rhs) => {
-                let (index_rhs, rhs_fdata) =
-                    self.compile_internal(rhs.clone(), function_data, None);
-                let bool_value = Value::Bool(*value);
 
-                macro_rules! variable_int_binop {
-                    ($op:tt, $operation_name:ident) => {
+                macro_rules! lhs_const_compare_int {
+                    ($op:tt) => {
                         (
                             Box::new(move |ec: &mut ExecutionContext, frame: &mut CallFrame| {
                                 let rhs = ec.run_lambda_trampoline(&index_rhs, frame);
-                                $operation_name!(bool_value, rhs, ec, $op)
+                                let rhs_type = ValueType::from_u8(rhs.get_tag());
+
+                                match rhs_type {
+                                    ValueType::Integer => Value::new_bool(int_value $op rhs.read_int()),
+                                    _ => panic!("Type error: Cannot evaluate {} on this value: {}", stringify!($op), rhs.to_string(ec)),
+                                }
                             }),
                             rhs_fdata,
                         )
                     };
                 }
-                dispatch_bin_op!(variable_int_binop, op)
-            }
-            //both sides are function calls, just trigger both
-            //@TODO mauybe this opt is unecessary/incompatible with the fastcall stuff
-            /*( Expr::FuncCall {func: func_lhs, args:args_lhs }, Expr::FuncCall { func: func_rhs, args: args_rhs } ) => {
 
-                let (callee_lhs, args_lhs, _, called_name_lhs, call_lhs) = self.compile_call_data(func_lhs,  args_lhs, function_data);
-                let (callee_rhs, args_rhs, _, called_name_rhs, call_rhs) = self.compile_call_data(func_rhs,  args_rhs, call_lhs);
+                match op {
+                    BinaryOp::Add => (
+                        Box::new(move |ec: &mut ExecutionContext, frame: &mut CallFrame| {
+                            let rhs = ec.run_lambda_trampoline(&index_rhs, frame);
+                            let rhs_type = ValueType::from_u8(rhs.get_tag());
 
-                macro_rules! call_both_sides {
-                    ($op:tt, $operation_name:ident) => {
-                        (Box::new(move |ec: &mut ExecutionContext, frame: &mut CallFrame| {
-                            let call_lhs = ec.eval_generic_call(&callee_lhs, &args_lhs, called_name_lhs);
-                            let call_lhs = ec.run_trampoline(call_lhs);
-
-                            let call_rhs = ec.eval_generic_call(&callee_rhs, &args_rhs, called_name_rhs);
-                            let call_rhs = ec.run_trampoline(call_rhs);
-
-                            $operation_name!(call_lhs, call_rhs, ec, $op)
-                        }), call_rhs)
-                    }
+                            match rhs_type {
+                                ValueType::Integer => Value::new_int(int_value + rhs.read_int()),
+                                ValueType::String => {
+                                    let mut s = rhs.get_string().to_string();
+                                    s.push_str(&int_value.to_string());
+                                    Value::make_string_ptr(ec.leak(s))
+                                }
+                                _ => panic!(
+                                    "Type error: Cannot evaluate + on this value: {}",
+                                    rhs.to_string(ec)
+                                ),
+                            }
+                        }),
+                        rhs_fdata,
+                    ),
+                    BinaryOp::Sub => lhs_const_arith!(-),
+                    BinaryOp::Mul => lhs_const_arith!(*),
+                    BinaryOp::Div => lhs_const_arith!(/),
+                    BinaryOp::Rem => lhs_const_arith!(%),
+                    BinaryOp::Eq => lhs_const_compare_int!(==),
+                    BinaryOp::Neq => lhs_const_compare_int!(!=),
+                    BinaryOp::Lt => lhs_const_compare_int!(<),
+                    BinaryOp::Gt => lhs_const_compare_int!(>),
+                    BinaryOp::Lte => lhs_const_compare_int!(<=),
+                    BinaryOp::Gte => lhs_const_compare_int!(>=),
+                    BinaryOp::And => panic!("&& cannot be applied to int"),
+                    BinaryOp::Or => panic!("|| cannot be applied to int"),
                 }
-
-                dispatch_bin_op!(call_both_sides, op)
-            }*/
+            }
+            
             //we could do constant folding here
             _ => return None,
         };
@@ -1753,8 +1797,12 @@ impl LambdaCompiler {
         function_data: FunctionData,
     ) -> (LambdaFunction, FunctionData) {
         //tries to return an optimized version that does less eval_calls
-        let optimized =
-            self.compile_binexp_opt(lhs.clone(), rhs.clone(), op.clone(), function_data.clone());
+        let optimized = self.compile_binexp_opt(
+            *lhs.clone(),
+            *rhs.clone(),
+            op.clone(),
+            function_data.clone(),
+        );
         if let Some(opt) = optimized {
             return opt;
         }
@@ -1767,12 +1815,15 @@ impl LambdaCompiler {
                 (Box::new(move |ec: &mut ExecutionContext, frame: &mut CallFrame| {
                     let lhs = ec.run_lambda_trampoline(&evaluate_lhs, frame);
                     let rhs = ec.run_lambda_trampoline(&evaluate_rhs, frame);
-                    match (&lhs, &rhs) {
-                        (Value::Int(lhs), Value::Int(rhs)) => {
-                            Value::Int(lhs $op rhs)
-                        }
-                        _ => panic!("Type error: Cannot apply binary operator {op} on these values: {lhs:?} and {rhs:?}", op = stringify!($op)),
+
+                    let lhs_type = ValueType::from_u8(lhs.get_tag());
+                    let rhs_type = ValueType::from_u8(rhs.get_tag());
+
+                    if lhs_type != ValueType::Integer || rhs_type != ValueType::Integer {
+                        panic!("Type error: Cannot apply binary operator {op} on these values: {lhs:?} and {rhs:?}", op = stringify!($op));
                     }
+
+                    return Value::new_int(lhs.read_int() $op rhs.read_int());
                 }), fdata_rhs)
             };
         }
@@ -1785,17 +1836,17 @@ impl LambdaCompiler {
                         let lhs = ec.run_lambda_trampoline(&evaluate_lhs, frame);
                         let rhs = ec.run_lambda_trampoline(&evaluate_rhs, frame);
 
-                        match (&lhs, &rhs) {
-                            (Value::Int(lhs), Value::Int(rhs)) => {
-                                Value::Bool(lhs $op rhs)
+                        let lhs_type = ValueType::from_u8(lhs.get_tag());
+                        let rhs_type = ValueType::from_u8(rhs.get_tag());
+
+                        match (lhs_type, rhs_type) {
+                            (ValueType::Integer, ValueType::Integer) | (ValueType::Boolean, ValueType::Boolean) => {
+                                Value::new_bool(lhs.0 $op rhs.0)
                             }
-                            (Value::Str(StringPointer(lhs)), Value::Str(StringPointer(rhs))) => {
-                                let lhs = &ec.string_values[*lhs as usize];
-                                let rhs = &ec.string_values[*rhs as usize];
-                                Value::Bool(lhs $op rhs)
-                            }
-                            (Value::Bool(lhs), Value::Bool(rhs)) => {
-                                Value::Bool(lhs $op rhs)
+                            (ValueType::String, ValueType::String) => {
+                                let lhs = lhs.get_string();
+                                let rhs = rhs.get_string();
+                                Value::new_bool(lhs $op rhs)
                             }
                             _ => panic!("Type error: Cannot apply binary operator {op} on these values: {lhs:?} and {rhs:?}", op = stringify!($op)),
                         }
@@ -1805,7 +1856,7 @@ impl LambdaCompiler {
                         let lhs = ec.run_lambda_trampoline(&evaluate_lhs, frame);
                         let rhs = ec.run_lambda_trampoline(&evaluate_rhs, frame);
 
-                        return Value::Bool(lhs $op rhs);
+                        return Value::new_bool(lhs.0 $op rhs.0);
                     }), fdata_rhs)
                 }
             };
@@ -1832,10 +1883,12 @@ impl LambdaCompiler {
                 Box::new(move |ec: &mut ExecutionContext, frame: &mut CallFrame| {
                     let lhs = ec.run_lambda_trampoline(&evaluate_lhs, frame);
                     let rhs = ec.run_lambda_trampoline(&evaluate_rhs, frame);
-                    match (&lhs, &rhs) {
-                    (Value::Bool(lhs), Value::Bool(rhs)) => Value::Bool(*lhs && *rhs),
-                    _ => panic!("Type error: Cannot apply binary operator && (and) on these values: {lhs:?} and {rhs:?}"),
-                }
+                    let lhs_type = ValueType::from_u8(lhs.get_tag());
+                    let rhs_type = ValueType::from_u8(rhs.get_tag());
+                    match (lhs_type, rhs_type) {
+                        (ValueType::Boolean, ValueType::Boolean) => Value::new_bool(lhs.read_bool() && rhs.read_bool()),
+                        _ => panic!("Type error: Cannot apply binary operator && (and) on these values: {lhs:?} and {rhs:?}"),
+                    }
                 }),
                 fdata_rhs,
             ),
@@ -1843,13 +1896,170 @@ impl LambdaCompiler {
                 Box::new(move |ec: &mut ExecutionContext, frame: &mut CallFrame| {
                     let lhs = ec.run_lambda_trampoline(&evaluate_lhs, frame);
                     let rhs = ec.run_lambda_trampoline(&evaluate_rhs, frame);
-                    match (&lhs, &rhs) {
-                    (Value::Bool(lhs), Value::Bool(rhs)) => Value::Bool(*lhs || *rhs),
-                    _ => panic!("Type error: Cannot apply binary operator || (or) on these values: {lhs:?} and {rhs:?}"),
-                }
+                    let lhs_type = ValueType::from_u8(lhs.get_tag());
+                    let rhs_type = ValueType::from_u8(rhs.get_tag());
+                    match (lhs_type, rhs_type) {
+                        (ValueType::Boolean, ValueType::Boolean) => Value::new_bool(lhs.read_bool() || rhs.read_bool()),
+                        _ => panic!("Type error: Cannot apply binary operator || (or) on these values: {lhs:?} and {rhs:?}"),
+                    }
                 }),
                 fdata_rhs,
             ),
         }
     }
+}
+
+#[cfg(test)]
+pub mod test {
+
+    use crate::lambda_compiler::{Value, ValueType};
+
+    #[test]
+    pub fn small_tuple_test_packing_and_unpacking() {
+        pub fn do_test(x: i32, y: i32) {
+            let tuple = Value::new_small_tuple(x, y);
+            let ty = ValueType::from_u8(tuple.get_tag());
+            if ty != ValueType::SmallTuple {
+                panic!("Type is not SmallTuple")
+            }
+            let (lhs, rhs) = tuple.read_small_tuple();
+            assert!(lhs == x);
+            assert!(rhs == y);
+        }
+
+        do_test(0, 0);
+        do_test(-1, 1);
+        do_test(536870911, -536870912);
+        do_test(12386, -9875);
+    }
+
+    #[test]
+    pub fn test_integer() {
+        pub fn do_test(x: i32) {
+            let value = Value::new_int(x);
+            let ty = ValueType::from_u8(value.get_tag());
+            if ty != ValueType::Integer {
+                panic!("Type is not Integer")
+            }
+            let result = value.read_int();
+            assert!(result == x);
+        }
+
+        do_test(0);
+        do_test(-1);
+        do_test(536870911);
+        do_test(-536870912);
+        do_test(i32::MAX);
+        do_test(i32::MIN);
+    }
+
+    #[test]
+    pub fn test_bool() {
+        pub fn do_test(x: bool) {
+            let value = Value::new_bool(x);
+            let ty = ValueType::from_u8(value.get_tag());
+            if ty != ValueType::Boolean {
+                panic!("Type is not Boolean")
+            }
+            let result = value.read_bool();
+            assert!(result == x);
+        }
+
+        do_test(true);
+        do_test(false);
+    }
+
+    #[test]
+    pub fn test_string() {
+        pub fn do_test(x: &'static String) {
+            let value = Value::make_string_ptr(x);
+            let ty = ValueType::from_u8(value.get_tag());
+            if ty != ValueType::String {
+                panic!("Type is not String")
+            }
+            let result = value.get_string();
+            assert!(result == x);
+        }
+
+        let s = "Hello".to_string();
+        let boxed = Box::new(s);
+        let leaked: &'static String = Box::leak(boxed);
+        do_test(leaked);
+    }
+
+    #[test]
+    pub fn test_tuple() {
+        pub fn do_test(x: &'static (Value, Value)) -> &'static (Value, Value) {
+            let value = Value::make_tuple_ptr(x);
+            let ty = ValueType::from_u8(value.get_tag());
+            if ty != ValueType::TuplePtr {
+                panic!("Type is not TuplePtr")
+            }
+            let result = value.get_tuple();
+            assert!(result == x);
+            return result;
+        }
+
+        let s = "Hello".to_string();
+        let boxed = Box::new(s);
+        let leaked: &'static String = Box::leak(boxed);
+
+        let tuple = (Value::new_int(0), Value::make_string_ptr(leaked));
+        let boxed = Box::new(tuple);
+        let leaked: &'static (Value, Value) = Box::leak(boxed);
+
+        let (l, r) = do_test(leaked);
+
+        assert!(l.read_int() == 0);
+        assert!(r.get_string() == "Hello");
+    }
+
+    /*
+    #[test]
+    pub fn test_closure() {
+        pub fn do_test(x: &'static &'static dyn Fn(&mut super::ExecutionContext, &mut super::CallFrame) -> super::Value) -> &'static &'static dyn Fn(&mut super::ExecutionContext, &mut super::CallFrame) -> super::Value {
+            let x_as_ptr_u64: u64 = unsafe { std::mem::transmute(x) };
+            let value = Value::make_closure(x);
+            let ty = ValueType::from_u8(value.get_tag());
+            if ty != ValueType::Closure {
+                panic!("Type is not Closure")
+            }
+            let result = value.get_closure();
+            let result_as_ptr_u64: u64 = unsafe { std::mem::transmute(result) };
+
+            assert!(result_as_ptr_u64 == x_as_ptr_u64);
+
+            return result;
+        }
+
+        let closure: LambdaFunction = Box::new(|ec: &mut super::ExecutionContext, frame: &mut super::CallFrame| {
+            super::Value::new_int(99887766)
+        });
+
+        let leaked: &'static dyn Fn(&mut ExecutionContext, &mut CallFrame) -> Value = Box::leak(closure);
+
+        let boxed = Box::new(leaked);
+        let leaked2: &'static &'static dyn Fn(&mut super::ExecutionContext, &mut super::CallFrame) -> super::Value = Box::leak(boxed);
+
+        let result = do_test(leaked2);
+
+        let callable = Callable {
+            body: Box::new(|_, _| super::Value::new_int(999)),
+            closure_builder: None,
+            name: None,
+            closure_vars: &[],
+            parameters: &[],
+            trampoline_of: None,
+            layout: std::collections::BTreeMap::new(),
+        };
+        let comp = CompilationResult {
+            functions: vec![],
+            main: callable,
+            strings: vec![]
+        };
+        let (mut ee, mut cf) = ExecutionContext::new(&comp);
+        let r = result(&mut ee, &mut cf);
+
+        assert!(r == super::Value::Int(99887766));
+    } */
 }

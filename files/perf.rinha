@@ -16,9 +16,9 @@ let work = fn(x) => {
     f * s
   };
 
-  iter(0, 200, work_closure, 0)
+  iter(0, 20, work_closure, 0)
 };
 
-let iteration = iter(0, 100, work, 0);
+let iteration = iter(0, 10, work, 0);
 
 print(iteration)

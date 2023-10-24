@@ -215,3 +215,107 @@ I implemented for 2 items up to 5 but those don't seem to help too much in perf.
 Instead of ec.frame(), just pass the current call frame along in the LambdaFunction.
 
 Massive improvements! 1.95 down to 1.55!
+
+18 - Tagging
+
+Instead of NaN tagging we will do a integer tagging.
+
+We need the following types:
+ - Integer
+ - Bool
+ - String ptr
+ - Tuple ptr
+ - Small Tuple
+ - Closure ptr
+ - Trampoline ptr
+
+That's 7 variants. 
+For that we need 3 bits of information (bits 1 1 1 = 7) 
+
+For integers:
+    Use pattern 0 0 0.
+
+    - Integer will come in signed, ex 1 0 0 0 1 0 1 1 .... first 1 tells it's negative
+    - If we just cast it to u64 we'll sign-extend the value :(
+  
+    - we can transmute into u32 and then cast to u64 to extend it to 64 bits with a bunch of leading zeros
+    - For instance, -1 will be 0x00000000ffffffff
+    - Pattern will be 0 0 0 [29 zeros] [32 bits of i32]  
+
+    Alternative:
+
+    There are 2 patterns for i32
+
+    0 0 0 0
+    1 x x x 
+
+    if type == 0 || type >= 8:
+        is integer
+
+    - Integer will come in signed, ex 1 0 0 0 1 0 1 1 ... first 1 tells it's negative
+    - Just cast it to i64
+    - Then cast transmute to u64
+    - result will be 1|0 [32 zeroes] [31 bits]
+
+    When we run our check 0 || >= 8, it will pass. Numbers could even be > 32 bits. But before we do math:
+        - transmute to i64
+        - cast to i32
+
+    Apply similar processes to make result into value
+
+For boolean:
+    Use pattern 0 0 0 1
+
+    To construct:
+
+     - Boolean will come in as true | false
+     - let bool_base = 0x1000000000000000
+     - bool_base += b? 1 : 0;
+
+    To check:
+     - Is boolean? value && 0xf000000000000000 == 0x1000000000000000
+     - Is false? value == 0x1000000000000000
+     - Is true? value == 0x1000000000000001
+
+For String ptr:
+    Use pattern 0 0 1 0
+
+    - Is stirng? value && 0xf000000000000000 = 0x2000000000000000
+    
+    - Get ptr: value & 0x0000ffffffffffff
+      - transmute to &'static str (make sure producer creates a &'static str)
+
+For Tuple ptr:
+
+    Use pattern 0 0 1 1
+
+    - Is tuple ptr? value && 0xf000000000000000 == 0x3000000000000000
+    - Get ptr: value && 0x0000ffffffffffff
+      - Transmute to &'static (u64, u64) containing 2 pointers that need to be de-refed
+
+For small tuples:
+
+    Use pattern 0 1 0 0
+    
+    - Is small tuple? value && 0xf000000000000000 == 0x4000000000000000
+
+    Max value:  536870911
+    Min value: -536870912
+    
+    - Packing:
+  
+       - extract 30 bit: 0x3fffffff
+
+    - Unpacking:
+      - Extract sign bit: value & 0x20000000
+      - If sign bit set:
+          - add the 2 bits in the beginning: value | 0xc0000000
+      - Turns out there's a branchless version: value << 2 >> 2, works due to sign extension
+  
+
+
+    - Get (i32, i32):
+      - Get tuple's 30 high bits: value & 0x0fffffffc0000000 >> 30
+      - Get tuple's 30 low bits:  value & 0x000000003fffffff >> 32
+
+
