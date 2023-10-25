@@ -1663,7 +1663,7 @@ impl LambdaCompiler {
                             Box::new(move |ec: &mut ExecutionContext, frame: &mut CallFrame| {
                                 let lhs = ec.run_lambda_trampoline(&index_lhs, frame);
                                 let lhs_type = ValueType::from_u8(lhs.get_tag());
-
+                                println!("Comparing {} == {}", lhs.read_int(), int_value);
                                 match lhs_type {
                                     ValueType::Integer => Value::new_bool(lhs.read_int() $op int_value),
                                     _ => panic!("Type error: Cannot evaluate {} on this value: {}", stringify!($op), lhs.to_string(ec)),
