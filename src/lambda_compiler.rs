@@ -1,4 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::io::{StdoutLock, Write};
 use std::ops::{Index, IndexMut};
 
 use smallvec::SmallVec;
@@ -35,24 +36,10 @@ pub enum ValueType {
     Trampoline = 0b0110,
 }
 
-impl ValueType {
-    pub fn tag(self) -> u64 {
-        (self as u8 as u64) << 60
-    }
 
-    pub fn from_u8(value: u8) -> Self {
-        match value {
-            0b0000 => Self::Integer,
-            0b0001 => Self::Boolean,
-            0b0010 => Self::String,
-            0b0011 => Self::TuplePtr,
-            0b0100 => Self::SmallTuple,
-            0b0101 => Self::Closure,
-            0b0110 => Self::Trampoline,
-            _ => {
-                panic!("Invalid value type tag: {:b}", value)
-            }
-        }
+impl ValueType {
+    pub const fn tag(self) -> u64 {
+        (self as u8 as u64) << 60
     }
 }
 
@@ -60,9 +47,47 @@ impl ValueType {
 pub struct Value(u64);
 
 impl Value {
-    pub fn get_tag(self) -> u8 {
-        ((self.0 & 0xf000000000000000u64) >> 60) as u8
+
+    #[inline(always)]
+    pub const fn get_tag(self) -> u64 {
+        self.0 & 0xf000000000000000u64
     }
+
+    #[inline(always)]
+    pub const fn is_int(self) -> bool {
+        self.get_tag() == ValueType::Integer.tag()
+    }
+
+    #[inline(always)]
+    pub const fn is_bool(self) -> bool {
+        self.get_tag() == ValueType::Boolean.tag()
+    }
+
+    #[inline(always)]
+    pub const fn is_closure(self) -> bool {
+        self.get_tag() == ValueType::Closure.tag()
+    }
+
+    #[inline(always)]
+    pub const fn is_trampoline(self) -> bool {
+        self.get_tag() == ValueType::Trampoline.tag()
+    }
+
+    #[inline(always)]
+    pub const fn is_small_tuple(self) -> bool {
+        self.get_tag() == ValueType::SmallTuple.tag()
+    }
+
+    #[inline(always)]
+    pub const fn is_tuple(self) -> bool {
+        self.get_tag() == ValueType::TuplePtr.tag()
+    }
+
+    #[inline(always)]
+    pub const fn is_str(self) -> bool {
+        self.get_tag() == ValueType::String.tag()
+    }
+
 
     pub fn new_int(i: i32) -> Self {
         let as_u32: u32 = unsafe { std::mem::transmute(i) };
@@ -184,37 +209,45 @@ impl Value {
      */
 }
 
-impl Value {
-    fn to_string(self, ec: &ExecutionContext) -> String {
-        let self_tag = self.get_tag();
-        let vtype = ValueType::from_u8(self_tag);
-        match vtype {
-            ValueType::Integer => {
-                let i = self.read_int();
-                i.to_string()
-            }
-            ValueType::Boolean => {
-                let b = self.read_bool();
-                b.to_string()
-            }
-            ValueType::String => {
-                let s = self.get_string();
-                s.to_string()
-            }
-            ValueType::TuplePtr => {
-                let (lhs, rhs) = self.get_tuple();
-                let lhs_str = lhs.to_string(ec);
-                let rhs_str = rhs.to_string(ec);
-                format!("({}, {})", lhs_str, rhs_str)
-            }
-            ValueType::SmallTuple => {
-                let (lhs, rhs) = self.read_small_tuple();
-                let lhs_str = lhs.to_string();
-                let rhs_str = rhs.to_string();
-                format!("({}, {})", lhs_str, rhs_str)
-            }
-            ValueType::Closure => "<function>".to_string(),
-            ValueType::Trampoline => "<trampoline>".to_string(),
+impl std::fmt::Display for Value {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+
+        if self.is_int() {
+            let i = self.read_int();
+            write!(f, "{}", i)
+        }
+        else if self.is_bool() {
+            let b = self.read_bool();
+            write!(f, "{}", b)
+        }
+        else if self.is_str() {
+            let s = self.get_string();
+            write!(f, "{}", s)
+        }
+        else if self.is_closure() {
+            write!(f, "<function>")
+        }
+        else if self.is_trampoline() {
+            write!(f, "<trampoline>")
+        }
+        else if self.is_small_tuple() {
+            let (lhs, rhs) = self.read_small_tuple();
+            write!(f, "(")?;
+            write!(f, "{}", lhs)?;
+            write!(f, ", ")?;
+            write!(f, "{}", rhs)?;
+            write!(f, ")")
+        }
+        else if self.is_tuple() {
+            let (lhs, rhs) = self.get_tuple();
+            write!(f, "(")?;
+            lhs.fmt(f)?;
+            write!(f, ", ")?;
+            rhs.fmt(f)?;
+            write!(f, ")")
+        }
+        else {
+            write!(f, "<unknown>")
         }
     }
 }
@@ -394,6 +427,7 @@ pub struct ExecutionContext<'a> {
     //And I think reusing a vec is actually faster, but for now this will have to suffice.
     pub closure_environments: Vec<ClosureStorage>,
     pub string_values: Vec<String>,
+    pub stdout: StdoutLock<'a>
     //most things are done in the "stack" for some definition of stack which is very loose here....
     //this heap is for things like dynamic tuples that could very well be infinite.
     //This makes the Value enum smaller than storing boxes directly
@@ -431,12 +465,15 @@ impl<'a> ExecutionContext<'a> {
             vec.reset(program.main.layout.len());
             vec
         };
+        let stdout = std::io::stdout();
+        let stdout = stdout.lock();
         (
             Self {
                 reusable_frames: vec![],
                 functions: &program.functions,
                 closure_environments: vec![],
                 string_values: program.strings.clone(),
+                stdout
             },
             CallFrame {
                 closure_ptr: Box::leak(Box::new(Closure {
@@ -446,16 +483,6 @@ impl<'a> ExecutionContext<'a> {
                 stack_data: initial_stack,
             },
         )
-    }
-
-    #[inline(always)]
-    fn eval_closure_no_env(&mut self, callable_index: usize) -> &'static Closure {
-        let cls = Closure {
-            callable_index,
-            closure_env_index: usize::MAX,
-        };
-        //@TODO always the same closure to stop allocating
-        self.leak(cls)
     }
 
     fn leak<T: 'static>(&self, data: T) -> &'static T {
@@ -512,14 +539,14 @@ impl<'a> ExecutionContext<'a> {
         frame: &mut CallFrame,
     ) -> Value {
         let condition_result = self.run_lambda_trampoline(evaluate_condition, frame);
-        if !condition_result.get_tag() == ValueType::Boolean as u8 {
+        if !condition_result.is_bool() {
             panic!("Type error: Cannot evaluate condition on this value: {condition_result:?}")
         }
         let b = condition_result.read_bool(); 
         if b {
-            self.run_lambda_trampoline(evaluate_then, frame)
+            evaluate_then(self, frame)
         } else {
-            self.run_lambda_trampoline(evaluate_otherwise, frame)
+            evaluate_otherwise(self, frame)
         }
     }
 
@@ -533,22 +560,22 @@ impl<'a> ExecutionContext<'a> {
         let lhs = self.run_lambda_trampoline(evaluate_lhs, frame);
         let rhs = self.run_lambda_trampoline(evaluate_rhs, frame);
 
-        let lhs_type = ValueType::from_u8(lhs.get_tag());
-        let rhs_type = ValueType::from_u8(rhs.get_tag());
+        if lhs.is_int() && rhs.is_int() {
+            Value::new_int(lhs.0 as i32 + rhs.0 as i32)
+        }
+        else if lhs.is_str() || rhs.is_str() {
+            use std::fmt::Write;
+            let mut buf = String::new();
 
-        match (&lhs_type, &rhs_type) {
-            (ValueType::Integer, ValueType::Integer) => Value::new_int(lhs.0 as i32 + rhs.0 as i32),
-            (_, ValueType::String) | (ValueType::String, _) => {
-                let str: &'static String = Box::leak(Box::new(format!(
-                    "{}{}",
-                    lhs.to_string(self),
-                    rhs.to_string(self)
-                )));
-                Value::make_string_ptr(str)
-            }
-            _ => panic!(
+            write!(&mut buf, "{}", lhs).unwrap();
+            write!(&mut buf, "{}", rhs).unwrap();
+            let str: &'static String = Box::leak(Box::new(buf));
+            Value::make_string_ptr(str)
+        }
+        else {
+            panic!(
                 "Type error: Cannot apply binary operator + on these values: {lhs:?} and {rhs:?}"
-            ),
+            )
         }
     }
 
@@ -565,9 +592,8 @@ impl<'a> ExecutionContext<'a> {
 
         let function = &self.functions[*callable_index].body;
         let function_result = function(self, &mut new_frame);
-        let function_result_type = ValueType::from_u8(function_result.get_tag());
-
-        if let ValueType::Trampoline = function_result_type {
+    
+        if function_result.is_trampoline() {
             //if the trampoline returned is not for ourselves, then we evaluate it
             let cls = function_result.get_closure();
 
@@ -596,7 +622,7 @@ impl<'a> ExecutionContext<'a> {
         frame: &mut CallFrame,
     ) -> Value {
         let callee_function = evaluate_callee(self, frame);
-        if callee_function.get_tag() != ValueType::Closure as u8 {
+        if !callee_function.is_closure() {
             panic!("Call to non-function value {called_name}: {callee_function:?}")
         }
 
@@ -613,9 +639,8 @@ impl<'a> ExecutionContext<'a> {
         let function = &callable.body;
 
         let function_result = function(self, &mut new_frame);
-        let function_result_type = ValueType::from_u8(function_result.get_tag());
 
-        if let ValueType::Trampoline = function_result_type {
+        if function_result.is_trampoline() {
             //if the trampoline returned is not for ourselves, then we evaluate it
             let closure = function_result.get_closure();
             let Closure {
@@ -661,24 +686,19 @@ impl<'a> ExecutionContext<'a> {
 
     #[inline(always)]
     pub fn run_trampoline(&mut self, maybe_trampoline: Value, frame: &mut CallFrame) -> Value {
-        {
-            let current_type = ValueType::from_u8(maybe_trampoline.get_tag());
-
-            if current_type != ValueType::Trampoline {
-                return maybe_trampoline;
-            };
-        }
-
+        
+        if !maybe_trampoline.is_trampoline() {
+            return maybe_trampoline;
+        };
+        
         let mut current = maybe_trampoline;
-        let mut current_type = ValueType::from_u8(current.get_tag());
 
-        while current_type == ValueType::Trampoline {
+        while current.is_trampoline() {
             let cls = current.get_closure();
             let Closure { callable_index, .. } = cls;
             frame.closure_ptr = cls;
             let function = &self.functions[*callable_index].body;
             current = function(self, frame);
-            current_type = ValueType::from_u8(current.get_tag());
         }
 
         current
@@ -733,20 +753,15 @@ impl<'a> ExecutionContext<'a> {
     ) -> Value {
         let f = self.run_lambda_trampoline(evaluate_first, frame);
         let s = self.run_lambda_trampoline(evaluate_second, frame);
-        let f_ty = ValueType::from_u8(f.get_tag());
-        let s_ty = ValueType::from_u8(s.get_tag());
 
-        match (f_ty, s_ty) {
-            (ValueType::Integer, ValueType::Integer) => {
-                let f_int = f.read_int();
-                let s_int = s.read_int();
+        if f.is_int() && s.is_int() {
+            let f_int = f.read_int();
+            let s_int = s.read_int();
 
-                if Value::fits_in_30_bits(f_int) && Value::fits_in_30_bits(s_int) {
-                    return Value::new_small_tuple(f_int, s_int);
-                }
+            if Value::fits_in_30_bits(f_int) && Value::fits_in_30_bits(s_int) {
+                return Value::new_small_tuple(f_int, s_int);
             }
-            _ => {}
-        };
+        }
 
         let leaked: &'static _ = Box::leak(Box::new((f, s)));
         Value::make_tuple_ptr(leaked)
@@ -895,16 +910,22 @@ impl LambdaCompiler {
         mut function_data: FunctionData,
         current_let: Option<Symbol>,
     ) -> (LambdaFunction, FunctionData) {
+
+        
+
         match ast {
             Expr::Print { value } => {
                 let (evaluate_printed_value, fdata) =
                     self.compile_internal(*value, function_data, current_let);
                 //because the type of the expression is only known at runtime, we have to check it in the print function during runtime :(
-                (
+                (   
+                    
                     Box::new(move |ec: &mut ExecutionContext, frame: &mut CallFrame| {
                         let value_to_print =
                             ec.run_lambda_trampoline(&evaluate_printed_value, frame);
-                        println!("{}", value_to_print.to_string(ec));
+                        
+                        write!(&mut ec.stdout, "{}\n", value_to_print).unwrap();
+
                         value_to_print
                     }),
                     fdata,
@@ -1073,20 +1094,17 @@ impl LambdaCompiler {
                 (
                     Box::new(move |ec: &mut ExecutionContext, frame: &mut CallFrame| {
                         let value = ec.run_lambda_trampoline(&evaluate_value, frame);
-                        let value_type = ValueType::from_u8(value.get_tag());
-                        match value_type {
-                            ValueType::TuplePtr => {
-                                let (a, _) = value.get_tuple();
-                                *a
-                            }
-                            ValueType::SmallTuple => {
-                                let (a, _) = value.read_small_tuple();
-                                Value::new_int(a)
-                            }
-                            _ => panic!(
-                                "Type error: Cannot evaluate second on this value: {}",
-                                value.to_string(ec)
-                            ),
+                        if value.is_tuple() {
+                            let (a, _) = value.get_tuple();
+                            *a
+                        } else if value.is_small_tuple() {
+                            let (a, _) = value.read_small_tuple();
+                            Value::new_int(a)
+                        } else {
+                            panic!(
+                                "Type error: Cannot evaluate first on this value: {}",
+                                value
+                            )
                         }
                     }),
                     second_fdata,
@@ -1098,20 +1116,17 @@ impl LambdaCompiler {
                 (
                     Box::new(move |ec: &mut ExecutionContext, frame: &mut CallFrame| {
                         let value = ec.run_lambda_trampoline(&evaluate_value, frame);
-                        let value_type = ValueType::from_u8(value.get_tag());
-                        match value_type {
-                            ValueType::TuplePtr => {
-                                let (_, b) = value.get_tuple();
-                                *b
-                            }
-                            ValueType::SmallTuple => {
-                                let (_, b) = value.read_small_tuple();
-                                Value::new_int(b)
-                            }
-                            _ => panic!(
-                                "Type error: Cannot evaluate second on this value: {}",
-                                value.to_string(ec)
-                            ),
+                        if value.is_tuple() {
+                            let (_, b) = value.get_tuple();
+                            *b
+                        } else if value.is_small_tuple() {
+                            let (_, b) = value.read_small_tuple();
+                            Value::new_int(b)
+                        } else {
+                            panic!(
+                                "Type error: Cannot evaluate first on this value: {}",
+                                value
+                            )
                         }
                     }),
                     second_fdata,
@@ -1375,8 +1390,12 @@ impl LambdaCompiler {
                         Value::make_closure(ec.eval_closure_with_env(new_callable_index, frame))
                     })
                 } else {
-                    Box::new(move |ec: &mut ExecutionContext, _| {
-                        Value::make_closure(ec.eval_closure_no_env(new_callable_index))
+                    let closure: &'static Closure = Box::leak(Box::new(Closure {
+                        callable_index: new_callable_index,
+                        closure_env_index: usize::MAX,
+                    }));
+                    Box::new(move |_, _| {
+                        Value::make_closure(closure)
                     })
                 }
             } else if !callable.closure_vars.is_empty() {
@@ -1384,8 +1403,12 @@ impl LambdaCompiler {
                     Value::make_trampoline(ec.eval_closure_with_env(new_callable_index, frame))
                 })
             } else {
-                Box::new(move |ec: &mut ExecutionContext, _| {
-                    Value::make_trampoline(ec.eval_closure_no_env(new_callable_index))
+                let closure: &'static Closure = Box::leak(Box::new(Closure {
+                    callable_index: new_callable_index,
+                    closure_env_index: usize::MAX,
+                }));
+                Box::new(move |_, _| {
+                    Value::make_trampoline(closure)
                 })
             },
             function_data,
@@ -1645,11 +1668,11 @@ impl LambdaCompiler {
                         (
                             Box::new(move |ec: &mut ExecutionContext, frame: &mut CallFrame| {
                                 let lhs = ec.run_lambda_trampoline(&index_lhs, frame);
-                                let lhs_type = ValueType::from_u8(lhs.get_tag());
-
-                                match lhs_type {
-                                    ValueType::Integer => Value::new_int(lhs.read_int() $op int_value),
-                                    _ => panic!("Type error: Cannot evaluate {} on this value: {}", stringify!($op), lhs.to_string(ec)),
+                                
+                                if lhs.is_int() {
+                                    Value::new_int(lhs.read_int() $op int_value)
+                                } else {
+                                    panic!("Type error: Cannot evaluate {} on this value: {}", stringify!($op), lhs)
                                 }
                             }),
                             lhs_fdata,
@@ -1662,11 +1685,11 @@ impl LambdaCompiler {
                         (
                             Box::new(move |ec: &mut ExecutionContext, frame: &mut CallFrame| {
                                 let lhs = ec.run_lambda_trampoline(&index_lhs, frame);
-                                let lhs_type = ValueType::from_u8(lhs.get_tag());
-                                println!("Comparing {} == {}", lhs.read_int(), int_value);
-                                match lhs_type {
-                                    ValueType::Integer => Value::new_bool(lhs.read_int() $op int_value),
-                                    _ => panic!("Type error: Cannot evaluate {} on this value: {}", stringify!($op), lhs.to_string(ec)),
+                                
+                                if lhs.is_int() {
+                                    Value::new_bool(lhs.read_int() $op int_value)
+                                } else {
+                                    panic!("Type error: Cannot evaluate {} on this value:{}", stringify!($op), lhs);
                                 }
                             }),
                             lhs_fdata,
@@ -1678,19 +1701,19 @@ impl LambdaCompiler {
                     BinaryOp::Add => (
                         Box::new(move |ec: &mut ExecutionContext, frame: &mut CallFrame| {
                             let lhs = ec.run_lambda_trampoline(&index_lhs, frame);
-                            let lhs_type = ValueType::from_u8(lhs.get_tag());
+                            //let lhs_type = ValueType::from_u8(lhs.get_tag());
 
-                            match lhs_type {
-                                ValueType::Integer => Value::new_int(lhs.read_int() + int_value),
-                                ValueType::String => {
-                                    let mut s = lhs.get_string().to_string();
-                                    s.push_str(&int_value.to_string());
-                                    Value::make_string_ptr(ec.leak(s))
-                                }
-                                _ => panic!(
+                            if lhs.is_int() {
+                                Value::new_int(lhs.read_int() + int_value)
+                            } else if lhs.is_str() {
+                                let mut s = lhs.get_string().to_string();
+                                s.push_str(&int_value.to_string());
+                                Value::make_string_ptr(ec.leak(s))
+                            } else {
+                                panic!(
                                     "Type error: Cannot evaluate + on this value: {}",
-                                    lhs.to_string(ec)
-                                ),
+                                    lhs
+                                )
                             }
                         }),
                         lhs_fdata,
@@ -1718,11 +1741,10 @@ impl LambdaCompiler {
                         (
                             Box::new(move |ec: &mut ExecutionContext, frame: &mut CallFrame| {
                                 let rhs = ec.run_lambda_trampoline(&index_rhs, frame);
-                                let rhs_type = ValueType::from_u8(rhs.get_tag());
-
-                                match rhs_type {
-                                    ValueType::Integer => Value::new_int(int_value $op rhs.read_int()),
-                                    _ => panic!("Type error: Cannot evaluate {} on this value: {}", stringify!($op), rhs.to_string(ec)),
+                                if rhs.is_int() {
+                                    Value::new_int(int_value $op rhs.read_int())
+                                } else {
+                                    panic!("Type error: Cannot evaluate {} on this value: {}", stringify!($op), rhs)
                                 }
                             }),
                             rhs_fdata,
@@ -1735,11 +1757,10 @@ impl LambdaCompiler {
                         (
                             Box::new(move |ec: &mut ExecutionContext, frame: &mut CallFrame| {
                                 let rhs = ec.run_lambda_trampoline(&index_rhs, frame);
-                                let rhs_type = ValueType::from_u8(rhs.get_tag());
-
-                                match rhs_type {
-                                    ValueType::Integer => Value::new_bool(int_value $op rhs.read_int()),
-                                    _ => panic!("Type error: Cannot evaluate {} on this value: {}", stringify!($op), rhs.to_string(ec)),
+                                if rhs.is_int() {
+                                    Value::new_bool(int_value $op rhs.read_int())
+                                } else {
+                                    panic!("Type error: Cannot evaluate {} on this value: {}", stringify!($op), rhs)
                                 }
                             }),
                             rhs_fdata,
@@ -1751,19 +1772,17 @@ impl LambdaCompiler {
                     BinaryOp::Add => (
                         Box::new(move |ec: &mut ExecutionContext, frame: &mut CallFrame| {
                             let rhs = ec.run_lambda_trampoline(&index_rhs, frame);
-                            let rhs_type = ValueType::from_u8(rhs.get_tag());
-
-                            match rhs_type {
-                                ValueType::Integer => Value::new_int(int_value + rhs.read_int()),
-                                ValueType::String => {
-                                    let mut s = rhs.get_string().to_string();
-                                    s.push_str(&int_value.to_string());
-                                    Value::make_string_ptr(ec.leak(s))
-                                }
-                                _ => panic!(
+                            if rhs.is_int() {
+                                Value::new_int(int_value + rhs.read_int())
+                            } else if rhs.is_str() {
+                                let mut s = rhs.get_string().to_string();
+                                s.push_str(&int_value.to_string());
+                                Value::make_string_ptr(ec.leak(s))
+                            } else {
+                                panic!(
                                     "Type error: Cannot evaluate + on this value: {}",
-                                    rhs.to_string(ec)
-                                ),
+                                    rhs
+                                )
                             }
                         }),
                         rhs_fdata,
@@ -1816,14 +1835,11 @@ impl LambdaCompiler {
                     let lhs = ec.run_lambda_trampoline(&evaluate_lhs, frame);
                     let rhs = ec.run_lambda_trampoline(&evaluate_rhs, frame);
 
-                    let lhs_type = ValueType::from_u8(lhs.get_tag());
-                    let rhs_type = ValueType::from_u8(rhs.get_tag());
-
-                    if lhs_type != ValueType::Integer || rhs_type != ValueType::Integer {
+                    if lhs.is_int() && rhs.is_int() {
+                        Value::new_int(lhs.read_int() $op rhs.read_int())
+                    } else {
                         panic!("Type error: Cannot apply binary operator {op} on these values: {lhs:?} and {rhs:?}", op = stringify!($op));
                     }
-
-                    return Value::new_int(lhs.read_int() $op rhs.read_int());
                 }), fdata_rhs)
             };
         }
@@ -1835,21 +1851,17 @@ impl LambdaCompiler {
                     (Box::new(move |ec: &mut ExecutionContext, frame: &mut CallFrame| {
                         let lhs = ec.run_lambda_trampoline(&evaluate_lhs, frame);
                         let rhs = ec.run_lambda_trampoline(&evaluate_rhs, frame);
+                        let same_type = lhs.get_tag() == rhs.get_tag();
 
-                        let lhs_type = ValueType::from_u8(lhs.get_tag());
-                        let rhs_type = ValueType::from_u8(rhs.get_tag());
-
-                        match (lhs_type, rhs_type) {
-                            (ValueType::Integer, ValueType::Integer) | (ValueType::Boolean, ValueType::Boolean) => {
-                                Value::new_bool(lhs.0 $op rhs.0)
-                            }
-                            (ValueType::String, ValueType::String) => {
-                                let lhs = lhs.get_string();
-                                let rhs = rhs.get_string();
-                                Value::new_bool(lhs $op rhs)
-                            }
-                            _ => panic!("Type error: Cannot apply binary operator {op} on these values: {lhs:?} and {rhs:?}", op = stringify!($op)),
-                        }
+                        if (same_type && (rhs.is_int() || rhs.is_bool())) {
+                            return Value::new_bool(lhs.0 $op rhs.0);
+                        } 
+                        if (same_type && (rhs.is_str())) {
+                            let lhs = lhs.get_string();
+                            let rhs = rhs.get_string();
+                            return Value::new_bool(lhs $op rhs);
+                        } 
+                        panic!("Type error: Cannot apply binary operator {op} on these values: {lhs:?} and {rhs:?}", op = stringify!($op));
                     }), fdata_rhs)
                 } else {
                     (Box::new(move |ec: &mut ExecutionContext, frame: &mut CallFrame| {
@@ -1883,11 +1895,10 @@ impl LambdaCompiler {
                 Box::new(move |ec: &mut ExecutionContext, frame: &mut CallFrame| {
                     let lhs = ec.run_lambda_trampoline(&evaluate_lhs, frame);
                     let rhs = ec.run_lambda_trampoline(&evaluate_rhs, frame);
-                    let lhs_type = ValueType::from_u8(lhs.get_tag());
-                    let rhs_type = ValueType::from_u8(rhs.get_tag());
-                    match (lhs_type, rhs_type) {
-                        (ValueType::Boolean, ValueType::Boolean) => Value::new_bool(lhs.read_bool() && rhs.read_bool()),
-                        _ => panic!("Type error: Cannot apply binary operator && (and) on these values: {lhs:?} and {rhs:?}"),
+                    if lhs.is_bool() && rhs.is_bool() {
+                        Value::new_bool(lhs.read_bool() && rhs.read_bool())
+                    } else {
+                        panic!("Type error: Cannot apply binary operator && (and) on these values: {lhs:?} and {rhs:?}")
                     }
                 }),
                 fdata_rhs,
@@ -1896,11 +1907,11 @@ impl LambdaCompiler {
                 Box::new(move |ec: &mut ExecutionContext, frame: &mut CallFrame| {
                     let lhs = ec.run_lambda_trampoline(&evaluate_lhs, frame);
                     let rhs = ec.run_lambda_trampoline(&evaluate_rhs, frame);
-                    let lhs_type = ValueType::from_u8(lhs.get_tag());
-                    let rhs_type = ValueType::from_u8(rhs.get_tag());
-                    match (lhs_type, rhs_type) {
-                        (ValueType::Boolean, ValueType::Boolean) => Value::new_bool(lhs.read_bool() || rhs.read_bool()),
-                        _ => panic!("Type error: Cannot apply binary operator || (or) on these values: {lhs:?} and {rhs:?}"),
+                   
+                    if lhs.is_bool() && rhs.is_bool() {
+                        Value::new_bool(lhs.read_bool() || rhs.read_bool())
+                    } else {
+                        panic!("Type error: Cannot apply binary operator || (or) on these values: {lhs:?} and {rhs:?}")
                     }
                 }),
                 fdata_rhs,
@@ -1912,14 +1923,14 @@ impl LambdaCompiler {
 #[cfg(test)]
 pub mod test {
 
-    use crate::lambda_compiler::{Value, ValueType};
+    use crate::lambda_compiler::Value;
 
     #[test]
     pub fn small_tuple_test_packing_and_unpacking() {
         pub fn do_test(x: i32, y: i32) {
             let tuple = Value::new_small_tuple(x, y);
-            let ty = ValueType::from_u8(tuple.get_tag());
-            if ty != ValueType::SmallTuple {
+            
+            if !tuple.is_small_tuple() {
                 panic!("Type is not SmallTuple")
             }
             let (lhs, rhs) = tuple.read_small_tuple();
@@ -1937,9 +1948,8 @@ pub mod test {
     pub fn test_integer() {
         pub fn do_test(x: i32) {
             let value = Value::new_int(x);
-            let ty = ValueType::from_u8(value.get_tag());
-            if ty != ValueType::Integer {
-                panic!("Type is not Integer")
+            if !value.is_int() {
+                panic!("Type is not Int")
             }
             let result = value.read_int();
             assert!(result == x);
@@ -1957,8 +1967,8 @@ pub mod test {
     pub fn test_bool() {
         pub fn do_test(x: bool) {
             let value = Value::new_bool(x);
-            let ty = ValueType::from_u8(value.get_tag());
-            if ty != ValueType::Boolean {
+           
+            if !value.is_bool() {
                 panic!("Type is not Boolean")
             }
             let result = value.read_bool();
@@ -1973,8 +1983,8 @@ pub mod test {
     pub fn test_string() {
         pub fn do_test(x: &'static String) {
             let value = Value::make_string_ptr(x);
-            let ty = ValueType::from_u8(value.get_tag());
-            if ty != ValueType::String {
+           
+            if !value.is_str() {
                 panic!("Type is not String")
             }
             let result = value.get_string();
@@ -1991,8 +2001,8 @@ pub mod test {
     pub fn test_tuple() {
         pub fn do_test(x: &'static (Value, Value)) -> &'static (Value, Value) {
             let value = Value::make_tuple_ptr(x);
-            let ty = ValueType::from_u8(value.get_tag());
-            if ty != ValueType::TuplePtr {
+           
+            if !value.is_tuple() {
                 panic!("Type is not TuplePtr")
             }
             let result = value.get_tuple();
@@ -2013,53 +2023,4 @@ pub mod test {
         assert!(l.read_int() == 0);
         assert!(r.get_string() == "Hello");
     }
-
-    /*
-    #[test]
-    pub fn test_closure() {
-        pub fn do_test(x: &'static &'static dyn Fn(&mut super::ExecutionContext, &mut super::CallFrame) -> super::Value) -> &'static &'static dyn Fn(&mut super::ExecutionContext, &mut super::CallFrame) -> super::Value {
-            let x_as_ptr_u64: u64 = unsafe { std::mem::transmute(x) };
-            let value = Value::make_closure(x);
-            let ty = ValueType::from_u8(value.get_tag());
-            if ty != ValueType::Closure {
-                panic!("Type is not Closure")
-            }
-            let result = value.get_closure();
-            let result_as_ptr_u64: u64 = unsafe { std::mem::transmute(result) };
-
-            assert!(result_as_ptr_u64 == x_as_ptr_u64);
-
-            return result;
-        }
-
-        let closure: LambdaFunction = Box::new(|ec: &mut super::ExecutionContext, frame: &mut super::CallFrame| {
-            super::Value::new_int(99887766)
-        });
-
-        let leaked: &'static dyn Fn(&mut ExecutionContext, &mut CallFrame) -> Value = Box::leak(closure);
-
-        let boxed = Box::new(leaked);
-        let leaked2: &'static &'static dyn Fn(&mut super::ExecutionContext, &mut super::CallFrame) -> super::Value = Box::leak(boxed);
-
-        let result = do_test(leaked2);
-
-        let callable = Callable {
-            body: Box::new(|_, _| super::Value::new_int(999)),
-            closure_builder: None,
-            name: None,
-            closure_vars: &[],
-            parameters: &[],
-            trampoline_of: None,
-            layout: std::collections::BTreeMap::new(),
-        };
-        let comp = CompilationResult {
-            functions: vec![],
-            main: callable,
-            strings: vec![]
-        };
-        let (mut ee, mut cf) = ExecutionContext::new(&comp);
-        let r = result(&mut ee, &mut cf);
-
-        assert!(r == super::Value::Int(99887766));
-    } */
 }
